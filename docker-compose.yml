@@ -1,0 +1,20 @@
+services:
+  backoffice_backend:
+    build: .
+    container_name: tpp_backoffice_backend
+    ports:
+      - "8002:8002"
+    env_file:
+      - .env
+    environment:
+      # Literal (sin interpolación): dentro del contenedor el host de la DB es el
+      # servicio `db` de tpp-net, no `localhost`. `environment` pisa a `env_file`.
+      DATABASE_URL: "postgresql://user:password@db:5432/tpp_db"
+    networks:
+      - tpp-net
+    restart: unless-stopped
+
+networks:
+  tpp-net:
+    external: true
+    name: tpp-net
