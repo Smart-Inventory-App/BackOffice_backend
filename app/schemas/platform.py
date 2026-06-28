@@ -48,6 +48,19 @@ class AppUserResponse(BaseModel):
 
 class UserStatusUpdate(BaseModel):
     is_active: bool
+    reason: Optional[str] = None
+
+
+class AuditEntry(BaseModel):
+    id: int
+    user_id: str
+    changed_by: str
+    is_active: bool
+    reason: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
 
 
 class ProductOwner(BaseModel):

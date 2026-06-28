@@ -7,6 +7,7 @@ from app.core.database import Base, engine
 # Register models before create_all
 from app.models import admin as _admin  # noqa: F401
 from app.models import app_models as _app_models  # noqa: F401
+from app.models import audit as _audit  # noqa: F401
 from app.api import auth, products, stats, users
 
 # Creates `admin_users`. Mirrored tables (auth_users/products/user_profiles)

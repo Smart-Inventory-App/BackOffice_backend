@@ -8,10 +8,12 @@ from app.core.database import get_db
 from app.core.security import get_current_admin
 from app.models.admin import AdminUser
 from app.models.app_models import AuthUser, Product, UserProfile
+from app.models.audit import UserStatusAudit
 from app.schemas.platform import (
     AdminProductResponse,
     AppUserDetail,
     AppUserResponse,
+    AuditEntry,
     PaginatedUsers,
     ProductOwner,
     UserStatusUpdate,
@@ -29,6 +31,12 @@ def _profiles(db: Session) -> dict[str, UserProfile]:
     return {p.user_id: p for p in db.query(UserProfile).all()}
 
 
+def _admin_emails(db: Session) -> list[str]:
+    """Emails que son administradores del backoffice (se excluyen del listado de
+    usuarios de la app: son cuentas de auth pero no usuarios finales)."""
+    return [row[0] for row in db.query(AdminUser.email).all()]
+
+
 @router.get("/", response_model=PaginatedUsers)
 def list_users(
     search: Optional[str] = Query(None),
@@ -39,6 +47,9 @@ def list_users(
     _: AdminUser = Depends(get_current_admin),
 ):
     query = db.query(AuthUser)
+    admin_emails = _admin_emails(db)
+    if admin_emails:
+        query = query.filter(AuthUser.email.notin_(admin_emails))
     if search:
         query = query.filter(AuthUser.email.ilike(f"%{search}%"))
     if status_filter == "active":
@@ -122,12 +133,22 @@ def update_user_status(
     user_id: str,
     data: UserStatusUpdate,
     db: Session = Depends(get_db),
-    _: AdminUser = Depends(get_current_admin),
+    current_admin: AdminUser = Depends(get_current_admin),
 ):
     user = db.query(AuthUser).filter(AuthUser.id == user_id).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
     user.is_active = data.is_active
+
+    reason = (data.reason or "").strip() or None
+    db.add(
+        UserStatusAudit(
+            user_id=str(user.id),
+            changed_by=current_admin.email,
+            is_active=data.is_active,
+            reason=reason,
+        )
+    )
     db.commit()
     db.refresh(user)
 
@@ -143,4 +164,18 @@ def update_user_status(
         first_name=prof.first_name if prof else None,
         last_name=prof.last_name if prof else None,
         product_count=counts.get(uid, 0),
+    )
+
+
+@router.get("/{user_id}/audit", response_model=list[AuditEntry])
+def get_user_audit(
+    user_id: str,
+    db: Session = Depends(get_db),
+    _: AdminUser = Depends(get_current_admin),
+):
+    return (
+        db.query(UserStatusAudit)
+        .filter(UserStatusAudit.user_id == user_id)
+        .order_by(UserStatusAudit.created_at.desc())
+        .all()
     )

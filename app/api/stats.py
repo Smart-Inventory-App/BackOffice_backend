@@ -4,6 +4,8 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from sqlalchemy import not_, true
+
 from app.core.database import get_db
 from app.core.security import get_current_admin
 from app.models.admin import AdminUser
@@ -26,11 +28,21 @@ def dashboard(
     today = date.today()
     now = datetime.utcnow()
 
-    total_users = db.query(func.count(AuthUser.id)).scalar() or 0
-    active_users = db.query(func.count(AuthUser.id)).filter(AuthUser.is_active.is_(True)).scalar() or 0
+    # Excluir administradores del conteo de usuarios de la app (son cuentas de auth
+    # pero no usuarios finales), igual que en el listado de Usuarios.
+    admin_emails = [row[0] for row in db.query(AdminUser.email).all()]
+    not_admin = not_(AuthUser.email.in_(admin_emails)) if admin_emails else true()
+
+    total_users = db.query(func.count(AuthUser.id)).filter(not_admin).scalar() or 0
+    active_users = (
+        db.query(func.count(AuthUser.id))
+        .filter(not_admin, AuthUser.is_active.is_(True))
+        .scalar()
+        or 0
+    )
     new_users_last_7d = (
         db.query(func.count(AuthUser.id))
-        .filter(AuthUser.created_at >= now - timedelta(days=7))
+        .filter(not_admin, AuthUser.created_at >= now - timedelta(days=7))
         .scalar()
         or 0
     )
