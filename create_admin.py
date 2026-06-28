@@ -1,28 +1,28 @@
-"""Seed / create a backoffice administrator.
+"""Alta de un administrador del backoffice (whitelist).
 
-Usage:
-    python create_admin.py <email> <password> [full_name]
+Solo agrega el email a la whitelist de administradores. La contraseña la define
+el propio admin en su primer inicio de sesión (a través del servicio auth).
 
-If run with no arguments it falls back to a default dev admin:
-    admin@smartinventory.com / Admin1234
+Uso:
+    python create_admin.py <email> "<Nombre Apellido>"
+
+Sin argumentos crea un admin por defecto:
+    admin@smartinventory.com
 """
 import sys
 
 from app.core.database import Base, SessionLocal, engine
-from app.core.security import hash_password
 from app.models.admin import AdminUser
 
 
 def main():
     Base.metadata.create_all(bind=engine)
 
-    if len(sys.argv) >= 3:
+    if len(sys.argv) >= 2:
         email = sys.argv[1]
-        password = sys.argv[2]
-        full_name = sys.argv[3] if len(sys.argv) >= 4 else None
+        full_name = sys.argv[2] if len(sys.argv) >= 3 else None
     else:
         email = "admin@smartinventory.com"
-        password = "Admin1234"
         full_name = "Administrador"
         print("No se pasaron argumentos: usando admin por defecto.")
 
@@ -32,15 +32,11 @@ def main():
         if existing:
             print(f"Ya existe un administrador con el email {email}. No se creó nada.")
             return
-        admin = AdminUser(
-            email=email,
-            hashed_password=hash_password(password),
-            full_name=full_name,
-        )
+        admin = AdminUser(email=email, full_name=full_name, password_set=False)
         db.add(admin)
         db.commit()
-        print(f"Administrador creado: {email}")
-        print(f"Contraseña: {password}")
+        print(f"Administrador agregado a la whitelist: {email}")
+        print("Definirá su contraseña en el primer inicio de sesión del backoffice.")
     finally:
         db.close()
 

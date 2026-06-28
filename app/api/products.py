@@ -7,7 +7,7 @@ from app.core.database import get_db
 from app.core.security import get_current_admin
 from app.models.admin import AdminUser
 from app.models.app_models import AuthUser, Product
-from app.schemas.platform import AdminProductResponse, ProductOwner
+from app.schemas.platform import AdminProductResponse, PaginatedProducts, ProductOwner
 
 router = APIRouter(prefix="/admin/products", tags=["admin-products"])
 
@@ -32,11 +32,13 @@ def _to_response(p: Product, emails: dict[str, str]) -> AdminProductResponse:
     )
 
 
-@router.get("/", response_model=list[AdminProductResponse])
+@router.get("/", response_model=PaginatedProducts)
 def list_products(
     search: Optional[str] = Query(None),
     categoria: Optional[str] = Query(None),
     only_with_image: bool = Query(False),
+    limit: int = Query(30, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     _: AdminUser = Depends(get_current_admin),
 ):
@@ -49,9 +51,10 @@ def list_products(
     if only_with_image:
         query = query.filter(Product.imagen_url.isnot(None), Product.imagen_url != "")
 
-    products = query.order_by(Product.created_at.desc()).all()
+    total = query.count()
+    products = query.order_by(Product.created_at.desc()).offset(offset).limit(limit).all()
     emails = _email_map(db)
-    return [_to_response(p, emails) for p in products]
+    return PaginatedProducts(items=[_to_response(p, emails) for p in products], total=total)
 
 
 @router.get("/{product_id}", response_model=AdminProductResponse)

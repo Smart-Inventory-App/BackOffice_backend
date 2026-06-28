@@ -73,4 +73,14 @@ class AppUserDetail(AppUserResponse):
     products: List[AdminProductResponse]
 
 
+class PaginatedUsers(BaseModel):
+    items: List[AppUserResponse]
+    total: int
+
+
+class PaginatedProducts(BaseModel):
+    items: List[AdminProductResponse]
+    total: int
+
+
 DashboardStats.model_rebuild()

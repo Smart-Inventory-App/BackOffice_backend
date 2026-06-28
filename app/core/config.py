@@ -12,12 +12,15 @@ class Settings(BaseSettings):
     # Shared database with the rest of the platform (auth_users, products, user_profiles)
     DATABASE_URL: str = "postgresql://user:password@localhost:5432/tpp_db"
 
-    # Dedicated JWT for admin sessions (independent from the app users' JWT_SECRET)
-    ADMIN_JWT_SECRET: str = "admin-secret-change-in-production"
-    ADMIN_JWT_ALGORITHM: str = "HS256"
-    ADMIN_JWT_EXPIRE_MINUTES: int = 120
+    # Auth service — los admins se autentican aquí, igual que los usuarios de la app.
+    AUTH_SERVICE_URL: str = "http://localhost:8001"
 
-    # CORS — comma-separated origins allowed to call this API (the backoffice frontend)
+    # JWT compartido con `auth` y `app_backend`. El backoffice SOLO valida tokens
+    # emitidos por el servicio auth (no los crea), igual que hace app_backend.
+    JWT_SECRET: str = "dev-secret-key-change-in-production"
+    JWT_ALGORITHM: str = "HS256"
+
+    # CORS — orígenes del frontend del backoffice
     ALLOWED_ORIGINS_STR: str = "http://localhost:3000,http://localhost:5173"
 
     @property

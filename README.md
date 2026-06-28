@@ -90,15 +90,12 @@ python -m venv venv
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
-# Crear el primer administrador
-# IMPORTANTE: se debe levantar la db del backoffice
+# Agregar un administrador a la whitelist (requiere la db levantada).
+# NO se define contraseña acá: el admin la define en su primer login (vía auth).
+python create_admin.py # admin por defecto: admin@smartinventory.com
+python create_admin.py mail@dominio.com "Nombre Apellido"
 
-# Usuario predeterminado: admin@smartinventory.com / contraseña: Admin1234
-python create_admin.py
-# Con credenciales propias:
-python create_admin.py mail@dominio.com MiClave123 "Nombre Apellido"
-
-# Levantar
+# Levantar (requiere el servicio auth corriendo en AUTH_SERVICE_URL)
 python main.py
 ```
 

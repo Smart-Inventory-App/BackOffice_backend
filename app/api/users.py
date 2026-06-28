@@ -12,6 +12,7 @@ from app.schemas.platform import (
     AdminProductResponse,
     AppUserDetail,
     AppUserResponse,
+    PaginatedUsers,
     ProductOwner,
     UserStatusUpdate,
 )
@@ -28,10 +29,12 @@ def _profiles(db: Session) -> dict[str, UserProfile]:
     return {p.user_id: p for p in db.query(UserProfile).all()}
 
 
-@router.get("/", response_model=list[AppUserResponse])
+@router.get("/", response_model=PaginatedUsers)
 def list_users(
     search: Optional[str] = Query(None),
     status_filter: Optional[str] = Query(None, pattern="^(active|inactive)$"),
+    limit: int = Query(30, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     _: AdminUser = Depends(get_current_admin),
 ):
@@ -43,7 +46,13 @@ def list_users(
     elif status_filter == "inactive":
         query = query.filter(AuthUser.is_active.is_(False))
 
-    users = query.order_by(AuthUser.created_at.desc().nullslast()).all()
+    total = query.count()
+    users = (
+        query.order_by(AuthUser.created_at.desc().nullslast())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
     counts = _product_counts(db)
     profiles = _profiles(db)
 
@@ -63,7 +72,7 @@ def list_users(
                 product_count=counts.get(uid, 0),
             )
         )
-    return result
+    return PaginatedUsers(items=result, total=total)
 
 
 @router.get("/{user_id}", response_model=AppUserDetail)
