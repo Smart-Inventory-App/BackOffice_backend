@@ -10,6 +10,8 @@ services:
       # Literal (sin interpolación): dentro del contenedor el host de la DB es el
       # servicio `db` de tpp-net, no `localhost`. `environment` pisa a `env_file`.
       DATABASE_URL: "postgresql://user:password@db:5432/tpp_db"
+      # Ídem para el servicio auth: `localhost` acá sería este mismo contenedor.
+      AUTH_SERVICE_URL: "http://tpp_auth:8000"
     networks:
       - tpp-net
     restart: unless-stopped
