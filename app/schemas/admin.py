@@ -33,8 +33,17 @@ class CheckEmailRequest(BaseModel):
 
 
 class CheckEmailResponse(BaseModel):
+    exists: bool
     is_admin: bool
     password_set: bool
+
+
+class MeResponse(BaseModel):
+    id: str
+    email: EmailStr
+    full_name: Optional[str] = None
+    is_admin: bool
+    is_active: bool
 
 
 class LoginRequest(BaseModel):

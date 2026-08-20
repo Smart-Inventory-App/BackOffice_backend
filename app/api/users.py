@@ -31,10 +31,11 @@ def _profiles(db: Session) -> dict[str, UserProfile]:
     return {p.user_id: p for p in db.query(UserProfile).all()}
 
 
-def _admin_emails(db: Session) -> list[str]:
-    """Emails que son administradores del backoffice (se excluyen del listado de
-    usuarios de la app: son cuentas de auth pero no usuarios finales)."""
-    return [row[0] for row in db.query(AdminUser.email).all()]
+def _admin_emails(db: Session) -> set[str]:
+    """Emails que son administradores del backoffice, para marcarlos en el listado
+    de usuarios de la app (ya no se excluyen: los admins también son cuentas
+    reales y deben verse)."""
+    return {row[0] for row in db.query(AdminUser.email).all()}
 
 
 @router.get("/", response_model=PaginatedUsers)
@@ -47,9 +48,6 @@ def list_users(
     _: AdminUser = Depends(get_current_admin),
 ):
     query = db.query(AuthUser)
-    admin_emails = _admin_emails(db)
-    if admin_emails:
-        query = query.filter(AuthUser.email.notin_(admin_emails))
     if search:
         query = query.filter(AuthUser.email.ilike(f"%{search}%"))
     if status_filter == "active":
@@ -66,6 +64,7 @@ def list_users(
     )
     counts = _product_counts(db)
     profiles = _profiles(db)
+    admin_emails = _admin_emails(db)
 
     result = []
     for u in users:
@@ -76,6 +75,7 @@ def list_users(
                 id=uid,
                 email=u.email,
                 is_active=bool(u.is_active),
+                is_admin=u.email in admin_emails,
                 created_at=u.created_at,
                 username=prof.username if prof else None,
                 first_name=prof.first_name if prof else None,
@@ -104,6 +104,7 @@ def get_user(
         id=uid,
         email=user.email,
         is_active=bool(user.is_active),
+        is_admin=user.email in _admin_emails(db),
         created_at=user.created_at,
         username=prof.username if prof else None,
         first_name=prof.first_name if prof else None,
@@ -159,6 +160,51 @@ def update_user_status(
         id=uid,
         email=user.email,
         is_active=bool(user.is_active),
+        is_admin=user.email in _admin_emails(db),
+        created_at=user.created_at,
+        username=prof.username if prof else None,
+        first_name=prof.first_name if prof else None,
+        last_name=prof.last_name if prof else None,
+        product_count=counts.get(uid, 0),
+    )
+
+
+@router.delete("/{user_id}/admin", response_model=AppUserResponse)
+def remove_admin(
+    user_id: str,
+    db: Session = Depends(get_db),
+    current_admin: AdminUser = Depends(get_current_admin),
+):
+    user = db.query(AuthUser).filter(AuthUser.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
+
+    admin = db.query(AdminUser).filter(AdminUser.email == user.email).first()
+    if not admin:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ese usuario no es administrador")
+    if admin.email == current_admin.email:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No podés quitarte tu propio rol de administrador",
+        )
+    active_admins = db.query(func.count(AdminUser.id)).filter(AdminUser.is_active.is_(True)).scalar() or 0
+    if admin.is_active and active_admins <= 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No se puede quitar al último administrador",
+        )
+
+    db.delete(admin)
+    db.commit()
+
+    uid = str(user.id)
+    prof = db.query(UserProfile).filter(UserProfile.user_id == uid).first()
+    counts = _product_counts(db)
+    return AppUserResponse(
+        id=uid,
+        email=user.email,
+        is_active=bool(user.is_active),
+        is_admin=False,
         created_at=user.created_at,
         username=prof.username if prof else None,
         first_name=prof.first_name if prof else None,
