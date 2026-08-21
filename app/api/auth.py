@@ -7,6 +7,7 @@ from app.core.database import get_db
 from app.core.security import get_current_admin, get_current_user
 from app.models.admin import AdminUser
 from app.models.app_models import AuthUser
+from app.models.audit import AdminActivityLog, AdminRoleAudit
 from app.schemas.admin import (
     AdminCreate,
     AdminResponse,
@@ -109,6 +110,18 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
 
     r = _auth_post("/auth/login", {"email": body.email, "password": body.password, "firebase_token": ""})
     if r.status_code == 200:
+        auth_user = db.query(AuthUser).filter(AuthUser.email == body.email).first()
+        db.add(
+            AdminActivityLog(
+                event_type="login",
+                actor_email=body.email,
+                target_user_id=str(auth_user.id) if auth_user else None,
+                target_email=body.email,
+                description=f"{body.email} inició sesión en el backoffice"
+                + (" (administrador)" if admin else ""),
+            )
+        )
+        db.commit()
         return TokenResponse(access_token=r.json()["access_token"])
     if r.status_code == 401:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales inválidas")
@@ -142,7 +155,7 @@ def list_admins(
 def create_admin(
     data: AdminCreate,
     db: Session = Depends(get_db),
-    _: AdminUser = Depends(get_current_admin),
+    current_admin: AdminUser = Depends(get_current_admin),
 ):
     if db.query(AdminUser).filter(AdminUser.email == data.email).first():
         raise HTTPException(
@@ -153,4 +166,16 @@ def create_admin(
     db.add(admin)
     db.commit()
     db.refresh(admin)
+
+    existing_user = db.query(AuthUser).filter(AuthUser.email == data.email).first()
+    if existing_user:
+        db.add(
+            AdminRoleAudit(
+                user_id=str(existing_user.id),
+                changed_by=current_admin.email,
+                action="granted",
+            )
+        )
+        db.commit()
+
     return admin

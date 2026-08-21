@@ -3,13 +3,21 @@ import io
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.export import products_to_csv, products_to_xlsx
 from app.core.security import get_current_user
-from app.models.app_models import AuthUser, Product, UserProfile
+from app.models.app_models import (
+    DEFAULT_DIAS_ALERTA_VENCIMIENTO,
+    DEFAULT_STOCK_MINIMO,
+    AuthUser,
+    Product,
+    UserProfile,
+)
+from app.models.audit import AdminActivityLog
 from app.schemas.platform import (
     BulkCommitRequest,
     BulkCommitResult,
@@ -20,6 +28,9 @@ from app.schemas.platform import (
     MyDefaults,
     MyProductCreate,
     MyProductResponse,
+    MyProductUpdate,
+    MyProfileResponse,
+    MyProfileUpdate,
     MyStats,
     PaginatedMyProducts,
     ProductSuggestion,
@@ -28,6 +39,40 @@ from app.schemas.platform import (
 router = APIRouter(prefix="/me", tags=["me"])
 
 REQUIRED_FIELDS = ("nombre", "categoria", "stock")
+
+MY_SORTABLE_FIELDS = {
+    "nombre": Product.nombre,
+    "stock": Product.stock,
+    "vencimiento": Product.vencimiento,
+    "categoria": Product.categoria,
+}
+
+
+def _log_activity(
+    db: Session,
+    event_type: str,
+    actor_email: Optional[str],
+    target_user_id: str,
+    target_email: Optional[str],
+    description: str,
+) -> None:
+    db.add(
+        AdminActivityLog(
+            event_type=event_type,
+            actor_email=actor_email,
+            target_user_id=target_user_id,
+            target_email=target_email,
+            description=description,
+        )
+    )
+    db.commit()
+
+
+def _get_own_product(product_id: int, user_id: str, db: Session) -> Product:
+    product = db.query(Product).filter(Product.id == product_id, Product.user_id == user_id).first()
+    if not product:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Producto no encontrado")
+    return product
 
 
 def _get_or_create_profile(user_id: str, db: Session) -> UserProfile:
@@ -66,13 +111,16 @@ def my_stats(
 ):
     uid = str(current.id)
     today = date.today()
+    profile = _get_or_create_profile(uid, db)
+    stock_minimo = profile.stock_minimo or DEFAULT_STOCK_MINIMO
+    dias_alerta = profile.dias_alerta_vencimiento or DEFAULT_DIAS_ALERTA_VENCIMIENTO
     own = db.query(Product).filter(Product.user_id == uid)
 
     total_products = own.count()
     products_with_image = own.filter(Product.imagen_url.isnot(None), Product.imagen_url != "").count()
-    low_stock = own.filter(Product.stock <= 1).count()
+    low_stock = own.filter(Product.stock < stock_minimo).count()
     expiring_soon = own.filter(
-        Product.vencimiento >= today, Product.vencimiento <= today + timedelta(days=7)
+        Product.vencimiento >= today, Product.vencimiento <= today + timedelta(days=dias_alerta)
     ).count()
     expired = own.filter(Product.vencimiento < today).count()
 
@@ -99,21 +147,106 @@ def my_stats(
 def my_products(
     search: Optional[str] = Query(None),
     categoria: Optional[str] = Query(None),
+    vencido: Optional[bool] = Query(None),
+    por_vencer: bool = Query(False),
+    bajo_stock: bool = Query(False),
+    sort_by: Optional[str] = Query(None, pattern="^(nombre|stock|vencimiento|categoria)$"),
+    sort_dir: str = Query("asc", pattern="^(asc|desc)$"),
     limit: int = Query(30, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     current: AuthUser = Depends(get_current_user),
 ):
-    query = db.query(Product).filter(Product.user_id == str(current.id))
+    uid = str(current.id)
+    query = db.query(Product).filter(Product.user_id == uid)
     if search:
         term = f"%{search}%"
         query = query.filter(Product.nombre.ilike(term) | Product.marca.ilike(term))
     if categoria:
         query = query.filter(Product.categoria.ilike(categoria))
+    if vencido is True:
+        query = query.filter(Product.vencimiento.isnot(None), Product.vencimiento < date.today())
+    elif vencido is False:
+        query = query.filter(
+            (Product.vencimiento.is_(None)) | (Product.vencimiento >= date.today())
+        )
+    if por_vencer:
+        today = date.today()
+        profile = _get_or_create_profile(uid, db)
+        dias_alerta = profile.dias_alerta_vencimiento or DEFAULT_DIAS_ALERTA_VENCIMIENTO
+        query = query.filter(Product.vencimiento >= today, Product.vencimiento <= today + timedelta(days=dias_alerta))
+    if bajo_stock:
+        profile = _get_or_create_profile(uid, db)
+        stock_minimo = profile.stock_minimo or DEFAULT_STOCK_MINIMO
+        query = query.filter(Product.stock < stock_minimo)
 
     total = query.count()
-    products = query.order_by(Product.created_at.desc()).offset(offset).limit(limit).all()
+    if sort_by:
+        column = MY_SORTABLE_FIELDS[sort_by]
+        query = query.order_by(column.desc() if sort_dir == "desc" else column.asc())
+    else:
+        query = query.order_by(Product.created_at.desc())
+    products = query.offset(offset).limit(limit).all()
     return PaginatedMyProducts(items=products, total=total)
+
+
+@router.get("/products/export")
+def export_my_products(
+    format: str = Query("csv", pattern="^(csv|xlsx)$"),
+    search: Optional[str] = Query(None),
+    categoria: Optional[str] = Query(None),
+    vencido: Optional[bool] = Query(None),
+    por_vencer: bool = Query(False),
+    bajo_stock: bool = Query(False),
+    sort_by: Optional[str] = Query(None, pattern="^(nombre|stock|vencimiento|categoria)$"),
+    sort_dir: str = Query("asc", pattern="^(asc|desc)$"),
+    db: Session = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    uid = str(current.id)
+    query = db.query(Product).filter(Product.user_id == uid)
+    if search:
+        term = f"%{search}%"
+        query = query.filter(Product.nombre.ilike(term) | Product.marca.ilike(term))
+    if categoria:
+        query = query.filter(Product.categoria.ilike(categoria))
+    if vencido is True:
+        query = query.filter(Product.vencimiento.isnot(None), Product.vencimiento < date.today())
+    elif vencido is False:
+        query = query.filter(
+            (Product.vencimiento.is_(None)) | (Product.vencimiento >= date.today())
+        )
+    if por_vencer:
+        today = date.today()
+        profile = _get_or_create_profile(uid, db)
+        dias_alerta = profile.dias_alerta_vencimiento or DEFAULT_DIAS_ALERTA_VENCIMIENTO
+        query = query.filter(Product.vencimiento >= today, Product.vencimiento <= today + timedelta(days=dias_alerta))
+    if bajo_stock:
+        profile = _get_or_create_profile(uid, db)
+        stock_minimo = profile.stock_minimo or DEFAULT_STOCK_MINIMO
+        query = query.filter(Product.stock < stock_minimo)
+
+    if sort_by:
+        column = MY_SORTABLE_FIELDS[sort_by]
+        query = query.order_by(column.desc() if sort_dir == "desc" else column.asc())
+    else:
+        query = query.order_by(Product.created_at.desc())
+    products = query.all()
+
+    if format == "xlsx":
+        content = products_to_xlsx(products)
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        filename = "mis_productos.xlsx"
+    else:
+        content = products_to_csv(products)
+        media_type = "text/csv"
+        filename = "mis_productos.csv"
+
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/products/filters/options")
@@ -126,6 +259,51 @@ def my_filter_options(
     ubicaciones = [row[0] for row in base.with_entities(Product.ubicacion).distinct().all() if row[0]]
     marcas = [row[0] for row in base.with_entities(Product.marca).distinct().all() if row[0]]
     return {"categorias": sorted(categorias), "ubicaciones": sorted(ubicaciones), "marcas": sorted(marcas)}
+
+
+@router.get("/profile", response_model=MyProfileResponse)
+def my_profile(
+    db: Session = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    profile = _get_or_create_profile(str(current.id), db)
+    return MyProfileResponse(
+        email=current.email,
+        first_name=profile.first_name,
+        last_name=profile.last_name,
+        username=profile.username,
+        stock_minimo=profile.stock_minimo or DEFAULT_STOCK_MINIMO,
+        dias_alerta_vencimiento=profile.dias_alerta_vencimiento or DEFAULT_DIAS_ALERTA_VENCIMIENTO,
+    )
+
+
+@router.put("/profile", response_model=MyProfileResponse)
+def update_my_profile(
+    data: MyProfileUpdate,
+    db: Session = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    profile = _get_or_create_profile(str(current.id), db)
+    if data.first_name is not None:
+        profile.first_name = data.first_name
+    if data.last_name is not None:
+        profile.last_name = data.last_name
+    if data.username is not None:
+        profile.username = data.username
+    if data.stock_minimo is not None:
+        profile.stock_minimo = data.stock_minimo
+    if data.dias_alerta_vencimiento is not None:
+        profile.dias_alerta_vencimiento = data.dias_alerta_vencimiento
+    db.commit()
+    db.refresh(profile)
+    return MyProfileResponse(
+        email=current.email,
+        first_name=profile.first_name,
+        last_name=profile.last_name,
+        username=profile.username,
+        stock_minimo=profile.stock_minimo or DEFAULT_STOCK_MINIMO,
+        dias_alerta_vencimiento=profile.dias_alerta_vencimiento or DEFAULT_DIAS_ALERTA_VENCIMIENTO,
+    )
 
 
 @router.get("/products/suggest", response_model=list[ProductSuggestion])
@@ -185,12 +363,41 @@ def create_my_product(
         existing.stock += data.stock
         db.commit()
         db.refresh(existing)
+        _log_activity(
+            db, "product_updated", current.email, uid, current.email,
+            f"{current.email} sumó {data.stock} unidades a \"{existing.nombre}\" (stock: {existing.stock}) desde el backoffice",
+        )
         return MyProductResponse.model_validate(existing, from_attributes=True).model_copy(update={"merged": True})
 
     product = Product(user_id=uid, **data.model_dump())
     db.add(product)
     db.commit()
     db.refresh(product)
+    _log_activity(
+        db, "product_created", current.email, uid, current.email,
+        f"{current.email} cargó \"{product.nombre}\" (stock: {product.stock}) desde el backoffice",
+    )
+    return product
+
+
+@router.patch("/products/{product_id}", response_model=MyProductResponse)
+def update_my_product(
+    product_id: int,
+    data: MyProductUpdate,
+    db: Session = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    product = _get_own_product(product_id, str(current.id), db)
+    changed_fields = list(data.model_dump(exclude_unset=True).keys())
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(product, field, value)
+    db.commit()
+    db.refresh(product)
+    if changed_fields:
+        _log_activity(
+            db, "product_updated", current.email, str(current.id), current.email,
+            f"{current.email} editó \"{product.nombre}\" ({', '.join(changed_fields)}) desde el backoffice",
+        )
     return product
 
 
@@ -357,6 +564,9 @@ def bulk_commit(
             if existing:
                 existing.stock += row.stock
                 merged += 1
+                nombre_log = existing.nombre
+                stock_log = existing.stock
+                kind_log = "sumó"
             else:
                 product = Product(
                     user_id=uid,
@@ -371,7 +581,15 @@ def bulk_commit(
                 )
                 db.add(product)
                 created += 1
+                nombre_log = row.nombre
+                stock_log = row.stock
+                kind_log = "cargó"
             db.commit()
+            _log_activity(
+                db, "product_created" if kind_log == "cargó" else "product_updated",
+                current.email, uid, current.email,
+                f"{current.email} {kind_log} \"{nombre_log}\" (stock: {stock_log}) por carga masiva",
+            )
         except Exception as e:
             db.rollback()
             failed += 1

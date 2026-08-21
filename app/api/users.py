@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -8,7 +9,7 @@ from app.core.database import get_db
 from app.core.security import get_current_admin
 from app.models.admin import AdminUser
 from app.models.app_models import AuthUser, Product, UserProfile
-from app.models.audit import UserStatusAudit
+from app.models.audit import AdminRoleAudit, UserStatusAudit
 from app.schemas.platform import (
     AdminProductResponse,
     AppUserDetail,
@@ -41,12 +42,14 @@ def _admin_emails(db: Session) -> set[str]:
 @router.get("/", response_model=PaginatedUsers)
 def list_users(
     search: Optional[str] = Query(None),
-    status_filter: Optional[str] = Query(None, pattern="^(active|inactive)$"),
+    status_filter: Optional[str] = Query(None, pattern="^(active|inactive|admin)$"),
     limit: int = Query(30, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     _: AdminUser = Depends(get_current_admin),
 ):
+    admin_emails = _admin_emails(db)
+
     query = db.query(AuthUser)
     if search:
         query = query.filter(AuthUser.email.ilike(f"%{search}%"))
@@ -54,6 +57,8 @@ def list_users(
         query = query.filter(AuthUser.is_active.is_(True))
     elif status_filter == "inactive":
         query = query.filter(AuthUser.is_active.is_(False))
+    elif status_filter == "admin":
+        query = query.filter(AuthUser.email.in_(admin_emails))
 
     total = query.count()
     users = (
@@ -64,7 +69,6 @@ def list_users(
     )
     counts = _product_counts(db)
     profiles = _profiles(db)
-    admin_emails = _admin_emails(db)
 
     result = []
     for u in users:
@@ -195,6 +199,13 @@ def remove_admin(
         )
 
     db.delete(admin)
+    db.add(
+        AdminRoleAudit(
+            user_id=str(user.id),
+            changed_by=current_admin.email,
+            action="revoked",
+        )
+    )
     db.commit()
 
     uid = str(user.id)
@@ -219,9 +230,29 @@ def get_user_audit(
     db: Session = Depends(get_db),
     _: AdminUser = Depends(get_current_admin),
 ):
-    return (
-        db.query(UserStatusAudit)
-        .filter(UserStatusAudit.user_id == user_id)
-        .order_by(UserStatusAudit.created_at.desc())
-        .all()
-    )
+    status_entries = [
+        AuditEntry(
+            id=e.id,
+            user_id=e.user_id,
+            changed_by=e.changed_by,
+            kind="status",
+            is_active=e.is_active,
+            reason=e.reason,
+            created_at=e.created_at,
+        )
+        for e in db.query(UserStatusAudit).filter(UserStatusAudit.user_id == user_id).all()
+    ]
+    role_entries = [
+        AuditEntry(
+            id=e.id,
+            user_id=e.user_id,
+            changed_by=e.changed_by,
+            kind="role",
+            action=e.action,
+            created_at=e.created_at,
+        )
+        for e in db.query(AdminRoleAudit).filter(AdminRoleAudit.user_id == user_id).all()
+    ]
+    combined = status_entries + role_entries
+    combined.sort(key=lambda e: e.created_at or datetime.min, reverse=True)
+    return combined

@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from typing import List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class CategoryCount(BaseModel):
@@ -56,7 +56,9 @@ class AuditEntry(BaseModel):
     id: int
     user_id: str
     changed_by: str
-    is_active: bool
+    kind: str  # "status" | "role"
+    is_active: Optional[bool] = None  # solo para kind == "status"
+    action: Optional[str] = None      # "granted" | "revoked", solo para kind == "role"
     reason: Optional[str] = None
     created_at: Optional[datetime] = None
 
@@ -134,6 +136,17 @@ class MyProductCreate(BaseModel):
     ubicacion: Optional[str] = None
 
 
+class MyProductUpdate(BaseModel):
+    nombre: Optional[str] = None
+    marca: Optional[str] = None
+    categoria: Optional[str] = None
+    stock: Optional[int] = None
+    vencimiento: Optional[date] = None
+    descripcion: Optional[str] = None
+    imagen_url: Optional[str] = None
+    ubicacion: Optional[str] = None
+
+
 class PaginatedMyProducts(BaseModel):
     items: List[MyProductResponse]
     total: int
@@ -149,6 +162,23 @@ class ProductSuggestion(BaseModel):
 class MyDefaults(BaseModel):
     last_categoria: Optional[str] = None
     last_ubicacion: Optional[str] = None
+
+
+class MyProfileResponse(BaseModel):
+    email: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    username: Optional[str] = None
+    stock_minimo: int
+    dias_alerta_vencimiento: int
+
+
+class MyProfileUpdate(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    username: Optional[str] = None
+    stock_minimo: Optional[int] = Field(None, gt=0)
+    dias_alerta_vencimiento: Optional[int] = Field(None, gt=0)
 
 
 class BulkProductRow(BaseModel):
@@ -185,6 +215,21 @@ class BulkCommitResult(BaseModel):
     merged: int
     failed: int
     errors: List[str]
+
+
+class ActivityEntry(BaseModel):
+    id: str
+    kind: str  # "status" | "role" | "login" | "product_deleted"
+    actor_email: Optional[str] = None
+    target_user_id: Optional[str] = None
+    target_email: Optional[str] = None
+    description: str
+    created_at: Optional[datetime] = None
+
+
+class PaginatedActivity(BaseModel):
+    items: List[ActivityEntry]
+    total: int
 
 
 DashboardStats.model_rebuild()
