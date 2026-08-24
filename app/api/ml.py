@@ -12,8 +12,11 @@ _INTERNAL_HEADERS = {"X-Internal-Token": settings.INTERNAL_SERVICE_TOKEN}
 
 async def _ml(method: str, path: str, **kwargs):
     url = f"{settings.ML_SERVICE_URL}{path}"
-    async with httpx.AsyncClient(timeout=300.0) as client:
-        r = await getattr(client, method)(url, headers=_INTERNAL_HEADERS, **kwargs)
+    try:
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            r = await getattr(client, method)(url, headers=_INTERNAL_HEADERS, **kwargs)
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"ML service error: {e}")
     if r.status_code >= 400:
         raise HTTPException(status_code=r.status_code, detail=r.text)
     return r.json()
