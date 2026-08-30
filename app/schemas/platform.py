@@ -118,6 +118,8 @@ class MyProductResponse(BaseModel):
     descripcion: Optional[str] = None
     imagen_url: Optional[str] = None
     ubicacion: Optional[str] = None
+    stock_minimo: Optional[int] = None
+    dias_alerta_vencimiento: Optional[int] = None
     created_at: Optional[datetime] = None
     merged: bool = False
 
@@ -134,6 +136,8 @@ class MyProductCreate(BaseModel):
     descripcion: Optional[str] = None
     imagen_url: Optional[str] = None
     ubicacion: Optional[str] = None
+    stock_minimo: Optional[int] = Field(None, gt=0)
+    dias_alerta_vencimiento: Optional[int] = Field(None, gt=0)
 
 
 class MyProductUpdate(BaseModel):
@@ -145,6 +149,8 @@ class MyProductUpdate(BaseModel):
     descripcion: Optional[str] = None
     imagen_url: Optional[str] = None
     ubicacion: Optional[str] = None
+    stock_minimo: Optional[int] = Field(None, gt=0)
+    dias_alerta_vencimiento: Optional[int] = Field(None, gt=0)
 
 
 class PaginatedMyProducts(BaseModel):
@@ -152,7 +158,19 @@ class PaginatedMyProducts(BaseModel):
     total: int
 
 
+class MyBulkEditRequest(BaseModel):
+    product_ids: List[int]
+    categoria: Optional[str] = None
+    ubicacion: Optional[str] = None
+    marca: Optional[str] = None
+
+
+class MyBulkEditResult(BaseModel):
+    updated: int
+
+
 class ProductSuggestion(BaseModel):
+    id: int
     nombre: str
     marca: Optional[str] = None
     categoria: str
@@ -191,6 +209,8 @@ class BulkProductRow(BaseModel):
     descripcion: Optional[str] = None
     imagen_url: Optional[str] = None
     ubicacion: Optional[str] = None
+    stock_minimo: Optional[int] = None
+    dias_alerta_vencimiento: Optional[int] = None
 
 
 class BulkParsedRow(BaseModel):
@@ -208,6 +228,7 @@ class BulkParseResponse(BaseModel):
 
 class BulkCommitRequest(BaseModel):
     rows: List[BulkProductRow]
+    mode: str = "entrada"  # "entrada" | "salida"
 
 
 class BulkCommitResult(BaseModel):
@@ -215,6 +236,32 @@ class BulkCommitResult(BaseModel):
     merged: int
     failed: int
     errors: List[str]
+
+
+class SalidaRequest(BaseModel):
+    product_id: int
+    quantity: int = Field(..., gt=0)
+    event_type: str = Field("consumed", pattern="^(consumed|expired)$")
+
+
+class ConsumoPorDia(BaseModel):
+    day: str
+    quantity: int
+
+
+class ProductoConsumo(BaseModel):
+    product_id: int
+    nombre: str
+    cantidad: int
+
+
+class MyMetrics(BaseModel):
+    period_days: int
+    total_consumido: int
+    total_entradas: int
+    consumo_por_dia: List[ConsumoPorDia]
+    top_productos: List[ProductoConsumo]
+    productos_menos_usados: List[ProductoConsumo]
 
 
 class ActivityEntry(BaseModel):

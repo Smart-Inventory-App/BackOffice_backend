@@ -14,6 +14,7 @@ from app.models.app_models import (
     DEFAULT_DIAS_ALERTA_VENCIMIENTO,
     DEFAULT_STOCK_MINIMO,
     AuthUser,
+    ConsumptionEvent,
     Product,
     UserProfile,
 )
@@ -25,6 +26,8 @@ from app.schemas.platform import (
     BulkParseResponse,
     BulkProductRow,
     CategoryCount,
+    MyBulkEditRequest,
+    MyBulkEditResult,
     MyDefaults,
     MyProductCreate,
     MyProductResponse,
@@ -34,6 +37,7 @@ from app.schemas.platform import (
     MyStats,
     PaginatedMyProducts,
     ProductSuggestion,
+    SalidaRequest,
 )
 
 router = APIRouter(prefix="/me", tags=["me"])
@@ -68,6 +72,20 @@ def _log_activity(
     db.commit()
 
 
+def _log_consumption(db: Session, product_id: int, user_id: str, quantity: int, event_type: str) -> None:
+    if quantity <= 0:
+        return
+    db.add(
+        ConsumptionEvent(
+            product_id=product_id,
+            user_id=user_id,
+            quantity=quantity,
+            event_type=event_type,
+        )
+    )
+    db.commit()
+
+
 def _get_own_product(product_id: int, user_id: str, db: Session) -> Product:
     product = db.query(Product).filter(Product.id == product_id, Product.user_id == user_id).first()
     if not product:
@@ -83,6 +101,22 @@ def _get_or_create_profile(user_id: str, db: Session) -> UserProfile:
         db.commit()
         db.refresh(profile)
     return profile
+
+
+def _passes_alert_filters(
+    p: Product, profile: UserProfile, bajo_stock: bool, por_vencer: bool, today: date
+) -> bool:
+    """Cada producto puede tener su propia regla de stock mínimo / días de
+    alerta de vencimiento; si no la tiene, se usa la del perfil del usuario."""
+    if bajo_stock:
+        threshold = p.stock_minimo or profile.stock_minimo or DEFAULT_STOCK_MINIMO
+        if not (p.stock < threshold):
+            return False
+    if por_vencer:
+        dias = p.dias_alerta_vencimiento or profile.dias_alerta_vencimiento or DEFAULT_DIAS_ALERTA_VENCIMIENTO
+        if not (p.vencimiento and today <= p.vencimiento <= today + timedelta(days=dias)):
+            return False
+    return True
 
 
 def _find_matching_product(
@@ -112,16 +146,13 @@ def my_stats(
     uid = str(current.id)
     today = date.today()
     profile = _get_or_create_profile(uid, db)
-    stock_minimo = profile.stock_minimo or DEFAULT_STOCK_MINIMO
-    dias_alerta = profile.dias_alerta_vencimiento or DEFAULT_DIAS_ALERTA_VENCIMIENTO
     own = db.query(Product).filter(Product.user_id == uid)
 
     total_products = own.count()
     products_with_image = own.filter(Product.imagen_url.isnot(None), Product.imagen_url != "").count()
-    low_stock = own.filter(Product.stock < stock_minimo).count()
-    expiring_soon = own.filter(
-        Product.vencimiento >= today, Product.vencimiento <= today + timedelta(days=dias_alerta)
-    ).count()
+    products_all = own.all()
+    low_stock = sum(1 for p in products_all if _passes_alert_filters(p, profile, True, False, today))
+    expiring_soon = sum(1 for p in products_all if _passes_alert_filters(p, profile, False, True, today))
     expired = own.filter(Product.vencimiento < today).count()
 
     by_category = [
@@ -170,15 +201,27 @@ def my_products(
         query = query.filter(
             (Product.vencimiento.is_(None)) | (Product.vencimiento >= date.today())
         )
-    if por_vencer:
+
+    if bajo_stock or por_vencer:
+        # bajo_stock/por_vencer dependen de la regla de cada producto (o la del
+        # perfil si el producto no tiene una propia), así que no se puede
+        # resolver con un único WHERE — se filtra en Python.
+        profile = _get_or_create_profile(uid, db)
         today = date.today()
-        profile = _get_or_create_profile(uid, db)
-        dias_alerta = profile.dias_alerta_vencimiento or DEFAULT_DIAS_ALERTA_VENCIMIENTO
-        query = query.filter(Product.vencimiento >= today, Product.vencimiento <= today + timedelta(days=dias_alerta))
-    if bajo_stock:
-        profile = _get_or_create_profile(uid, db)
-        stock_minimo = profile.stock_minimo or DEFAULT_STOCK_MINIMO
-        query = query.filter(Product.stock < stock_minimo)
+        candidates = [p for p in query.all() if _passes_alert_filters(p, profile, bajo_stock, por_vencer, today)]
+        total = len(candidates)
+        if sort_by == "nombre":
+            candidates.sort(key=lambda p: (p.nombre or "").lower(), reverse=(sort_dir == "desc"))
+        elif sort_by == "stock":
+            candidates.sort(key=lambda p: p.stock, reverse=(sort_dir == "desc"))
+        elif sort_by == "vencimiento":
+            candidates.sort(key=lambda p: p.vencimiento or date.max, reverse=(sort_dir == "desc"))
+        elif sort_by == "categoria":
+            candidates.sort(key=lambda p: (p.categoria or "").lower(), reverse=(sort_dir == "desc"))
+        else:
+            candidates.sort(key=lambda p: p.created_at or datetime.min, reverse=True)
+        products = candidates[offset : offset + limit]
+        return PaginatedMyProducts(items=products, total=total)
 
     total = query.count()
     if sort_by:
@@ -216,22 +259,17 @@ def export_my_products(
         query = query.filter(
             (Product.vencimiento.is_(None)) | (Product.vencimiento >= date.today())
         )
-    if por_vencer:
-        today = date.today()
-        profile = _get_or_create_profile(uid, db)
-        dias_alerta = profile.dias_alerta_vencimiento or DEFAULT_DIAS_ALERTA_VENCIMIENTO
-        query = query.filter(Product.vencimiento >= today, Product.vencimiento <= today + timedelta(days=dias_alerta))
-    if bajo_stock:
-        profile = _get_or_create_profile(uid, db)
-        stock_minimo = profile.stock_minimo or DEFAULT_STOCK_MINIMO
-        query = query.filter(Product.stock < stock_minimo)
-
     if sort_by:
         column = MY_SORTABLE_FIELDS[sort_by]
         query = query.order_by(column.desc() if sort_dir == "desc" else column.asc())
     else:
         query = query.order_by(Product.created_at.desc())
     products = query.all()
+
+    if bajo_stock or por_vencer:
+        profile = _get_or_create_profile(uid, db)
+        today = date.today()
+        products = [p for p in products if _passes_alert_filters(p, profile, bajo_stock, por_vencer, today)]
 
     if format == "xlsx":
         content = products_to_xlsx(products)
@@ -327,7 +365,7 @@ def suggest_products(
             continue
         seen.add(key)
         suggestions.append(
-            ProductSuggestion(nombre=p.nombre, marca=p.marca, categoria=p.categoria, ubicacion=p.ubicacion)
+            ProductSuggestion(id=p.id, nombre=p.nombre, marca=p.marca, categoria=p.categoria, ubicacion=p.ubicacion)
         )
         if len(suggestions) >= 8:
             break
@@ -363,6 +401,7 @@ def create_my_product(
         existing.stock += data.stock
         db.commit()
         db.refresh(existing)
+        _log_consumption(db, existing.id, uid, data.stock, "restocked")
         _log_activity(
             db, "product_updated", current.email, uid, current.email,
             f"{current.email} sumó {data.stock} unidades a \"{existing.nombre}\" (stock: {existing.stock}) desde el backoffice",
@@ -380,6 +419,47 @@ def create_my_product(
     return product
 
 
+@router.patch("/products/bulk-edit", response_model=MyBulkEditResult)
+def bulk_edit_my_products(
+    data: MyBulkEditRequest,
+    db: Session = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    if not data.product_ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No se seleccionó ningún producto")
+
+    changes: dict = {}
+    if data.categoria is not None:
+        changes["categoria"] = data.categoria
+    if data.ubicacion is not None:
+        changes["ubicacion"] = data.ubicacion
+    if data.marca is not None:
+        changes["marca"] = data.marca
+    if not changes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No se especificó ningún cambio")
+
+    uid = str(current.id)
+    products = (
+        db.query(Product)
+        .filter(Product.id.in_(data.product_ids), Product.user_id == uid)
+        .all()
+    )
+    if not products:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No se encontraron productos")
+
+    for p in products:
+        for field, value in changes.items():
+            setattr(p, field, value)
+    db.commit()
+
+    campos = ", ".join(changes.keys())
+    _log_activity(
+        db, "product_updated", current.email, uid, current.email,
+        f"{current.email} editó {len(products)} productos en lote ({campos}) desde el backoffice",
+    )
+    return MyBulkEditResult(updated=len(products))
+
+
 @router.patch("/products/{product_id}", response_model=MyProductResponse)
 def update_my_product(
     product_id: int,
@@ -388,16 +468,54 @@ def update_my_product(
     current: AuthUser = Depends(get_current_user),
 ):
     product = _get_own_product(product_id, str(current.id), db)
-    changed_fields = list(data.model_dump(exclude_unset=True).keys())
-    for field, value in data.model_dump(exclude_unset=True).items():
+    update_dict = data.model_dump(exclude_unset=True)
+    new_stock = update_dict.get("stock")
+    old_stock = product.stock
+
+    changed_fields = list(update_dict.keys())
+    for field, value in update_dict.items():
         setattr(product, field, value)
     db.commit()
     db.refresh(product)
+
+    if new_stock is not None and new_stock != old_stock:
+        if new_stock < old_stock:
+            _log_consumption(db, product.id, str(current.id), old_stock - new_stock, "consumed")
+        else:
+            _log_consumption(db, product.id, str(current.id), new_stock - old_stock, "restocked")
+
     if changed_fields:
         _log_activity(
             db, "product_updated", current.email, str(current.id), current.email,
             f"{current.email} editó \"{product.nombre}\" ({', '.join(changed_fields)}) desde el backoffice",
         )
+    return product
+
+
+@router.post("/products/salida", response_model=MyProductResponse)
+def register_salida(
+    data: SalidaRequest,
+    db: Session = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    uid = str(current.id)
+    product = _get_own_product(data.product_id, uid, db)
+    if data.quantity > product.stock:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"No hay suficiente stock: tenés {product.stock} y pediste sacar {data.quantity}",
+        )
+
+    product.stock -= data.quantity
+    db.commit()
+    db.refresh(product)
+
+    _log_consumption(db, product.id, uid, data.quantity, data.event_type)
+    motivo = "vencido" if data.event_type == "expired" else "consumido"
+    _log_activity(
+        db, "product_updated", current.email, uid, current.email,
+        f"{current.email} sacó {data.quantity} unidades de \"{product.nombre}\" ({motivo}, stock: {product.stock}) desde el backoffice",
+    )
     return product
 
 
@@ -438,7 +556,19 @@ def _clean_str(raw) -> Optional[str]:
     return text or None
 
 
-def _validate_row(raw: dict, row_number: int) -> BulkParsedRow:
+def _coerce_optional_int(raw, field_label: str) -> tuple[Optional[int], Optional[str]]:
+    if raw is None or str(raw).strip() == "":
+        return None, None
+    try:
+        value = int(float(str(raw).strip()))
+    except ValueError:
+        return None, f"{field_label} debe ser un número entero"
+    if value <= 0:
+        return None, f"{field_label} debe ser mayor a 0"
+    return value, None
+
+
+def _validate_row(raw: dict, row_number: int, mode: str = "entrada") -> BulkParsedRow:
     errors: list[str] = []
 
     nombre = _clean_str(raw.get("nombre"))
@@ -446,7 +576,7 @@ def _validate_row(raw: dict, row_number: int) -> BulkParsedRow:
         errors.append("nombre es obligatorio")
 
     categoria = _clean_str(raw.get("categoria"))
-    if not categoria:
+    if mode == "entrada" and not categoria:
         errors.append("categoria es obligatoria")
 
     stock, stock_error = _coerce_stock(raw.get("stock"))
@@ -456,6 +586,16 @@ def _validate_row(raw: dict, row_number: int) -> BulkParsedRow:
     vencimiento, venc_error = _coerce_vencimiento(raw.get("vencimiento"))
     if venc_error:
         errors.append(venc_error)
+
+    stock_minimo, stock_minimo_error = _coerce_optional_int(raw.get("stock_minimo"), "stock_minimo")
+    if stock_minimo_error:
+        errors.append(stock_minimo_error)
+
+    dias_alerta, dias_alerta_error = _coerce_optional_int(
+        raw.get("dias_alerta_vencimiento"), "dias_alerta_vencimiento"
+    )
+    if dias_alerta_error:
+        errors.append(dias_alerta_error)
 
     # Siempre devolvemos los datos parseados (aunque haya errores) para que el
     # frontend pueda mostrarlos en un editor y el usuario los corrija a mano,
@@ -470,6 +610,8 @@ def _validate_row(raw: dict, row_number: int) -> BulkParsedRow:
         descripcion=_clean_str(raw.get("descripcion")),
         imagen_url=_clean_str(raw.get("imagen_url")),
         ubicacion=_clean_str(raw.get("ubicacion")),
+        stock_minimo=stock_minimo,
+        dias_alerta_vencimiento=dias_alerta,
     )
     return BulkParsedRow(row_number=row_number, data=data, valid=not errors, errors=errors)
 
@@ -502,6 +644,7 @@ def _read_xlsx(content: bytes) -> list[dict]:
 
 @router.post("/products/bulk/parse", response_model=BulkParseResponse)
 def bulk_parse(
+    mode: str = Query("entrada", pattern="^(entrada|salida)$"),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current: AuthUser = Depends(get_current_user),
@@ -524,11 +667,30 @@ def bulk_parse(
     parsed: list[BulkParsedRow] = []
 
     for idx, raw in enumerate(raw_rows, start=2):  # fila 1 es el encabezado
-        result = _validate_row(raw, idx)
+        result = _validate_row(raw, idx, mode)
         if result.valid and result.data:
             marca_key = result.data.marca.strip().lower() if result.data.marca else None
             key = (result.data.nombre.strip().lower(), marca_key, result.data.vencimiento)
-            if key in local_stock:
+
+            if mode == "salida":
+                if key in local_stock:
+                    available = local_stock[key]
+                else:
+                    existing = _find_matching_product(
+                        uid, result.data.nombre, result.data.marca, result.data.vencimiento, db
+                    )
+                    available = existing.stock if existing else None
+                if available is None:
+                    result.valid = False
+                    result.errors.append("no existe un producto tuyo con ese nombre/marca/vencimiento")
+                elif result.data.stock > available:
+                    result.valid = False
+                    result.errors.append(f"no hay suficiente stock disponible (hay {available})")
+                else:
+                    result.action = "salida"
+                    result.existing_stock = available
+                    local_stock[key] = available - result.data.stock
+            elif key in local_stock:
                 result.action = "merge"
                 result.existing_stock = local_stock[key]
                 local_stock[key] += result.data.stock
@@ -560,6 +722,22 @@ def bulk_commit(
 
     for row in body.rows:
         try:
+            if body.mode == "salida":
+                existing = _find_matching_product(uid, row.nombre, row.marca, row.vencimiento, db)
+                if not existing:
+                    raise ValueError("no existe un producto tuyo con ese nombre/marca/vencimiento")
+                if row.stock > existing.stock:
+                    raise ValueError(f"no hay suficiente stock disponible (hay {existing.stock})")
+                existing.stock -= row.stock
+                db.commit()
+                _log_consumption(db, existing.id, uid, row.stock, "consumed")
+                merged += 1
+                _log_activity(
+                    db, "product_updated", current.email, uid, current.email,
+                    f"{current.email} sacó {row.stock} unidades de \"{existing.nombre}\" (stock: {existing.stock}) por carga masiva",
+                )
+                continue
+
             existing = _find_matching_product(uid, row.nombre, row.marca, row.vencimiento, db)
             if existing:
                 existing.stock += row.stock
@@ -578,6 +756,8 @@ def bulk_commit(
                     descripcion=row.descripcion,
                     imagen_url=row.imagen_url,
                     ubicacion=row.ubicacion,
+                    stock_minimo=row.stock_minimo,
+                    dias_alerta_vencimiento=row.dias_alerta_vencimiento,
                 )
                 db.add(product)
                 created += 1
@@ -585,6 +765,8 @@ def bulk_commit(
                 stock_log = row.stock
                 kind_log = "cargó"
             db.commit()
+            if existing:
+                _log_consumption(db, existing.id, uid, row.stock, "restocked")
             _log_activity(
                 db, "product_created" if kind_log == "cargó" else "product_updated",
                 current.email, uid, current.email,

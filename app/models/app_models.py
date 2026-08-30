@@ -6,7 +6,7 @@ services already create them); the backoffice only reads/manages rows.
 """
 import uuid
 
-from sqlalchemy import Boolean, Column, Date, DateTime, Integer, String, func
+from sqlalchemy import Boolean, Column, Date, DateTime, ForeignKey, Integer, String, func
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.database import Base
@@ -39,6 +39,8 @@ class Product(Base):
     descripcion = Column(String, nullable=True)
     imagen_url = Column(String, nullable=True)
     ubicacion = Column(String, nullable=True)
+    stock_minimo = Column(Integer, nullable=True)
+    dias_alerta_vencimiento = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -57,6 +59,21 @@ class UserProfile(Base):
     stock_minimo = Column(Integer, nullable=True)
     dias_alerta_vencimiento = Column(Integer, nullable=True)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class ConsumptionEvent(Base):
+    """Owned by `app_backend` — table `consumption_events`. Registra cada
+    movimiento de stock (entrada/salida) para poder analizar consumo."""
+
+    __tablename__ = "consumption_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String, nullable=False, index=True)
+    quantity = Column(Integer, nullable=False)
+    # "consumed": bajó el stock por uso/vencimiento; "restocked": entró stock nuevo
+    event_type = Column(String, nullable=False, server_default="consumed")
+    consumed_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 DEFAULT_STOCK_MINIMO = 10
