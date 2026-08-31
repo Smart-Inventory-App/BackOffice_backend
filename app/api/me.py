@@ -26,6 +26,8 @@ from app.schemas.platform import (
     BulkParseResponse,
     BulkProductRow,
     CategoryCount,
+    ConsumptionEventOut,
+    EventCorrection,
     MyBulkEditRequest,
     MyBulkEditResult,
     MyDefaults,
@@ -365,7 +367,16 @@ def suggest_products(
             continue
         seen.add(key)
         suggestions.append(
-            ProductSuggestion(id=p.id, nombre=p.nombre, marca=p.marca, categoria=p.categoria, ubicacion=p.ubicacion)
+            ProductSuggestion(
+                id=p.id,
+                nombre=p.nombre,
+                marca=p.marca,
+                categoria=p.categoria,
+                ubicacion=p.ubicacion,
+                vencimiento=p.vencimiento,
+                stock_minimo=p.stock_minimo,
+                dias_alerta_vencimiento=p.dias_alerta_vencimiento,
+            )
         )
         if len(suggestions) >= 8:
             break
@@ -517,6 +528,107 @@ def register_salida(
         f"{current.email} sacó {data.quantity} unidades de \"{product.nombre}\" ({motivo}, stock: {product.stock}) desde el backoffice",
     )
     return product
+
+
+def _stock_effect(event_type: str, quantity: int) -> int:
+    return quantity if event_type == "restocked" else -quantity
+
+
+def _get_own_consumption_event(product_id: int, event_id: int, db: Session) -> ConsumptionEvent:
+    event = db.query(ConsumptionEvent).filter(
+        ConsumptionEvent.id == event_id,
+        ConsumptionEvent.product_id == product_id,
+    ).first()
+    if not event:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Registro de consumo no encontrado")
+    return event
+
+
+@router.get("/products/{product_id}/consumption", response_model=list[ConsumptionEventOut])
+def get_consumption_history(
+    product_id: int,
+    db: Session = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    uid = str(current.id)
+    _get_own_product(product_id, uid, db)
+    events = (
+        db.query(ConsumptionEvent)
+        .filter(ConsumptionEvent.product_id == product_id)
+        .order_by(ConsumptionEvent.consumed_at.asc())
+        .all()
+    )
+    return events
+
+
+@router.put("/products/{product_id}/events/{event_id}")
+def update_consumption_event(
+    product_id: int,
+    event_id: int,
+    data: EventCorrection,
+    db: Session = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    uid = str(current.id)
+    product = _get_own_product(product_id, uid, db)
+    event = _get_own_consumption_event(product_id, event_id, db)
+
+    new_stock = (
+        product.stock
+        - _stock_effect(event.event_type, event.quantity)
+        + _stock_effect(data.event_type, data.quantity)
+    )
+    if new_stock < 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No se puede corregir: dejaría el stock en negativo",
+        )
+
+    old_quantity = event.quantity
+    event.quantity = data.quantity
+    event.event_type = data.event_type
+    product.stock = new_stock
+    db.commit()
+    db.refresh(product)
+
+    _log_activity(
+        db, "product_updated", current.email, uid, current.email,
+        f"{current.email} corrigió un consumo de \"{product.nombre}\" "
+        f"(de {old_quantity} a {data.quantity} unidades) desde el backoffice",
+    )
+    return {"event_type": event.event_type, "quantity": event.quantity, "remaining_stock": product.stock}
+
+
+@router.delete("/products/{product_id}/events/{event_id}")
+def delete_consumption_event(
+    product_id: int,
+    event_id: int,
+    db: Session = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    uid = str(current.id)
+    product = _get_own_product(product_id, uid, db)
+    event = _get_own_consumption_event(product_id, event_id, db)
+
+    quantity = event.quantity
+    motivo = event.event_type
+    new_stock = product.stock - _stock_effect(motivo, quantity)
+    if new_stock < 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No se puede borrar: dejaría el stock en negativo",
+        )
+    product.stock = new_stock
+    db.delete(event)
+    db.commit()
+    db.refresh(product)
+
+    _log_activity(
+        db, "product_updated", current.email, uid, current.email,
+        f"{current.email} eliminó un registro de consumo de \"{product.nombre}\" "
+        f"({quantity} unidades, {motivo}) desde el backoffice",
+    )
+    return {"remaining_stock": product.stock}
 
 
 # ---- Carga masiva (CSV / Excel) ----
