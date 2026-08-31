@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql://user:password@localhost:5432/tpp_db"
 
     AUTH_SERVICE_URL: str = "http://localhost:8001"
+    APP_BACKEND_URL: str = "http://localhost:8000"
     ML_SERVICE_URL: str = "http://localhost:8003"
     INTERNAL_SERVICE_TOKEN: str = "change-this-internal-token"
 

@@ -1,5 +1,8 @@
+from typing import Literal
+
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 
 from app.core.config import settings
 from app.core.security import get_current_admin
@@ -22,14 +25,23 @@ async def _ml(method: str, path: str, **kwargs):
     return r.json()
 
 
+class TrainRequest(BaseModel):
+    model_type: Literal["gbm", "xgboost", "lightgbm", "svr"] = "gbm"
+
+
 @router.get("/models")
 async def list_models(_: AdminUser = Depends(get_current_admin)):
     return await _ml("get", "/models/")
 
 
 @router.post("/models/train")
-async def train_model(_: AdminUser = Depends(get_current_admin)):
-    return await _ml("post", "/models/train")
+async def train_model(body: TrainRequest = TrainRequest(), _: AdminUser = Depends(get_current_admin)):
+    return await _ml("post", "/models/train", json=body.model_dump())
+
+
+@router.get("/models/{version_id}/feature-importances")
+async def get_feature_importances(version_id: str, _: AdminUser = Depends(get_current_admin)):
+    return await _ml("get", f"/models/{version_id}/feature-importances")
 
 
 @router.post("/models/{version_id}/activate")
