@@ -176,6 +176,7 @@ class ProductSuggestion(BaseModel):
     categoria: str
     ubicacion: Optional[str] = None
     vencimiento: Optional[date] = None
+    stock: int = 0
     stock_minimo: Optional[int] = None
     dias_alerta_vencimiento: Optional[int] = None
 
@@ -245,6 +246,7 @@ class SalidaRequest(BaseModel):
     product_id: int
     quantity: int = Field(..., gt=0)
     event_type: str = Field("consumed", pattern="^(consumed|expired)$")
+    note: Optional[str] = None
 
 
 class ConsumptionEventOut(BaseModel):
@@ -252,11 +254,16 @@ class ConsumptionEventOut(BaseModel):
     quantity: int
     event_type: str
     consumed_at: datetime
+    note: Optional[str] = None
+    actor_email: Optional[str] = None
+    reverses_event_id: Optional[int] = None
+    reversed: bool = False
 
 
 class EventCorrection(BaseModel):
     quantity: int = Field(..., gt=0)
     event_type: str = Field(..., pattern="^(consumed|expired|restocked)$")
+    note: Optional[str] = None
 
 
 class ConsumoPorDia(BaseModel):

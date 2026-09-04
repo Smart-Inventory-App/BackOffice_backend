@@ -74,7 +74,15 @@ def _log_activity(
     db.commit()
 
 
-def _log_consumption(db: Session, product_id: int, user_id: str, quantity: int, event_type: str) -> None:
+def _log_consumption(
+    db: Session,
+    product_id: int,
+    user_id: str,
+    quantity: int,
+    event_type: str,
+    actor_email: Optional[str] = None,
+    note: Optional[str] = None,
+) -> None:
     if quantity <= 0:
         return
     db.add(
@@ -83,6 +91,8 @@ def _log_consumption(db: Session, product_id: int, user_id: str, quantity: int, 
             user_id=user_id,
             quantity=quantity,
             event_type=event_type,
+            actor_email=actor_email,
+            note=note,
         )
     )
     db.commit()
@@ -355,32 +365,24 @@ def suggest_products(
     rows = (
         db.query(Product)
         .filter(Product.user_id == str(current.id), Product.nombre.ilike(f"%{q}%"))
-        .order_by(Product.created_at.desc())
-        .limit(50)
+        .order_by(Product.nombre.asc(), Product.vencimiento.asc())
+        .limit(10)
         .all()
     )
-    seen: set[str] = set()
-    suggestions: list[ProductSuggestion] = []
-    for p in rows:
-        key = p.nombre.strip().lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        suggestions.append(
-            ProductSuggestion(
-                id=p.id,
-                nombre=p.nombre,
-                marca=p.marca,
-                categoria=p.categoria,
-                ubicacion=p.ubicacion,
-                vencimiento=p.vencimiento,
-                stock_minimo=p.stock_minimo,
-                dias_alerta_vencimiento=p.dias_alerta_vencimiento,
-            )
+    return [
+        ProductSuggestion(
+            id=p.id,
+            nombre=p.nombre,
+            marca=p.marca,
+            categoria=p.categoria,
+            ubicacion=p.ubicacion,
+            vencimiento=p.vencimiento,
+            stock=p.stock,
+            stock_minimo=p.stock_minimo,
+            dias_alerta_vencimiento=p.dias_alerta_vencimiento,
         )
-        if len(suggestions) >= 8:
-            break
-    return suggestions
+        for p in rows
+    ]
 
 
 @router.get("/products/defaults", response_model=MyDefaults)
@@ -412,7 +414,7 @@ def create_my_product(
         existing.stock += data.stock
         db.commit()
         db.refresh(existing)
-        _log_consumption(db, existing.id, uid, data.stock, "restocked")
+        _log_consumption(db, existing.id, uid, data.stock, "restocked", actor_email=current.email)
         _log_activity(
             db, "product_updated", current.email, uid, current.email,
             f"{current.email} sumó {data.stock} unidades a \"{existing.nombre}\" (stock: {existing.stock}) desde el backoffice",
@@ -491,9 +493,9 @@ def update_my_product(
 
     if new_stock is not None and new_stock != old_stock:
         if new_stock < old_stock:
-            _log_consumption(db, product.id, str(current.id), old_stock - new_stock, "consumed")
+            _log_consumption(db, product.id, str(current.id), old_stock - new_stock, "consumed", actor_email=current.email)
         else:
-            _log_consumption(db, product.id, str(current.id), new_stock - old_stock, "restocked")
+            _log_consumption(db, product.id, str(current.id), new_stock - old_stock, "restocked", actor_email=current.email)
 
     if changed_fields:
         _log_activity(
@@ -521,7 +523,7 @@ def register_salida(
     db.commit()
     db.refresh(product)
 
-    _log_consumption(db, product.id, uid, data.quantity, data.event_type)
+    _log_consumption(db, product.id, uid, data.quantity, data.event_type, actor_email=current.email, note=data.note)
     motivo = "vencido" if data.event_type == "expired" else "consumido"
     _log_activity(
         db, "product_updated", current.email, uid, current.email,
@@ -541,6 +543,19 @@ def _get_own_consumption_event(product_id: int, event_id: int, db: Session) -> C
     ).first()
     if not event:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Registro de consumo no encontrado")
+    if event.reverses_event_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Este registro ya es una corrección — no se puede corregir de nuevo",
+        )
+    already_reversed = db.query(ConsumptionEvent).filter(
+        ConsumptionEvent.reverses_event_id == event.id
+    ).first()
+    if already_reversed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Este registro ya fue corregido — corregí la versión más reciente",
+        )
     return event
 
 
@@ -558,7 +573,20 @@ def get_consumption_history(
         .order_by(ConsumptionEvent.consumed_at.asc())
         .all()
     )
-    return events
+    reversed_ids = {e.reverses_event_id for e in events if e.reverses_event_id is not None}
+    return [
+        ConsumptionEventOut(
+            id=e.id,
+            quantity=e.quantity,
+            event_type=e.event_type,
+            consumed_at=e.consumed_at,
+            note=e.note,
+            actor_email=e.actor_email,
+            reverses_event_id=e.reverses_event_id,
+            reversed=e.id in reversed_ids,
+        )
+        for e in events
+    ]
 
 
 @router.put("/products/{product_id}/events/{event_id}")
@@ -584,19 +612,36 @@ def update_consumption_event(
             detail="No se puede corregir: dejaría el stock en negativo",
         )
 
-    old_quantity = event.quantity
-    event.quantity = data.quantity
-    event.event_type = data.event_type
+    reversal_type = "consumed" if event.event_type == "restocked" else "restocked"
+    db.add(ConsumptionEvent(
+        product_id=product.id,
+        user_id=product.user_id,
+        quantity=event.quantity,
+        event_type=reversal_type,
+        actor_email=current.email,
+        note=f"Corrección: revierte el registro #{event.id}",
+        reverses_event_id=event.id,
+    ))
+    new_event = ConsumptionEvent(
+        product_id=product.id,
+        user_id=product.user_id,
+        quantity=data.quantity,
+        event_type=data.event_type,
+        actor_email=current.email,
+        note=data.note or f"Corrige el registro #{event.id} (antes: {event.quantity} {event.event_type})",
+    )
+    db.add(new_event)
     product.stock = new_stock
     db.commit()
     db.refresh(product)
+    db.refresh(new_event)
 
     _log_activity(
         db, "product_updated", current.email, uid, current.email,
         f"{current.email} corrigió un consumo de \"{product.nombre}\" "
-        f"(de {old_quantity} a {data.quantity} unidades) desde el backoffice",
+        f"(de {event.quantity} a {data.quantity} unidades) desde el backoffice",
     )
-    return {"event_type": event.event_type, "quantity": event.quantity, "remaining_stock": product.stock}
+    return {"event_type": new_event.event_type, "quantity": new_event.quantity, "remaining_stock": product.stock}
 
 
 @router.delete("/products/{product_id}/events/{event_id}")
@@ -618,14 +663,23 @@ def delete_consumption_event(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="No se puede borrar: dejaría el stock en negativo",
         )
+    reversal_type = "consumed" if motivo == "restocked" else "restocked"
+    db.add(ConsumptionEvent(
+        product_id=product.id,
+        user_id=product.user_id,
+        quantity=quantity,
+        event_type=reversal_type,
+        actor_email=current.email,
+        note=f"Deshecho: revierte el registro #{event.id}",
+        reverses_event_id=event.id,
+    ))
     product.stock = new_stock
-    db.delete(event)
     db.commit()
     db.refresh(product)
 
     _log_activity(
         db, "product_updated", current.email, uid, current.email,
-        f"{current.email} eliminó un registro de consumo de \"{product.nombre}\" "
+        f"{current.email} deshizo un registro de consumo de \"{product.nombre}\" "
         f"({quantity} unidades, {motivo}) desde el backoffice",
     )
     return {"remaining_stock": product.stock}
@@ -842,7 +896,7 @@ def bulk_commit(
                     raise ValueError(f"no hay suficiente stock disponible (hay {existing.stock})")
                 existing.stock -= row.stock
                 db.commit()
-                _log_consumption(db, existing.id, uid, row.stock, "consumed")
+                _log_consumption(db, existing.id, uid, row.stock, "consumed", actor_email=current.email, note="Carga masiva")
                 merged += 1
                 _log_activity(
                     db, "product_updated", current.email, uid, current.email,
@@ -878,7 +932,7 @@ def bulk_commit(
                 kind_log = "cargó"
             db.commit()
             if existing:
-                _log_consumption(db, existing.id, uid, row.stock, "restocked")
+                _log_consumption(db, existing.id, uid, row.stock, "restocked", actor_email=current.email, note="Carga masiva")
             _log_activity(
                 db, "product_created" if kind_log == "cargó" else "product_updated",
                 current.email, uid, current.email,
