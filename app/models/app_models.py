@@ -74,6 +74,12 @@ class ConsumptionEvent(Base):
     # "consumed": bajó el stock por uso/vencimiento; "restocked": entró stock nuevo
     event_type = Column(String, nullable=False, server_default="consumed")
     consumed_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    # Quién generó el movimiento (distinto de user_id, que es de quién es el inventario)
+    actor_email = Column(String, nullable=True)
+    # Motivo libre opcional
+    note = Column(String, nullable=True)
+    # Ledger append-only: si está seteado, esta fila revierte el efecto de otra fila
+    reverses_event_id = Column(Integer, ForeignKey("consumption_events.id", ondelete="SET NULL"), nullable=True)
 
 
 DEFAULT_STOCK_MINIMO = 10

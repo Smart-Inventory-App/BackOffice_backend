@@ -22,11 +22,16 @@ def my_metrics(
     today = date.today()
     since = today - timedelta(days=period - 1)
 
+    reversed_ids = db.query(ConsumptionEvent.reverses_event_id).filter(
+        ConsumptionEvent.reverses_event_id.isnot(None)
+    )
     base = (
         db.query(ConsumptionEvent)
         .filter(
             ConsumptionEvent.user_id == uid,
             func.date(ConsumptionEvent.consumed_at) >= since,
+            ConsumptionEvent.reverses_event_id.is_(None),
+            ConsumptionEvent.id.notin_(reversed_ids),
         )
     )
     events = base.all()
