@@ -222,6 +222,17 @@ def test_an_unreachable_coordinator_gives_502(admin_client, ocr_transport):
     assert resp.status_code == 502
 
 
+def test_purge_goes_through_the_coordinator(admin_client, ocr_transport):
+    # Contra el coordinador y no contra el storage: el storage es dependencia
+    # suya, no de este servicio.
+    received = ocr_transport(lambda _: httpx.Response(200, json={"purged": 3}))
+
+    data = admin_client.post("/admin/ocr/temp/purge").json()
+
+    assert data == {"purged": 3}
+    assert received[0].url.path == "/ocr/maintenance/purge-temp"
+
+
 def test_the_endpoints_require_an_admin():
     with TestClient(app) as c:
         assert c.get("/admin/ocr/status").status_code in (401, 403)
