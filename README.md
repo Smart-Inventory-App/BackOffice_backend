@@ -33,6 +33,7 @@ Puerto: **8002**.
 ## Endpoints (`/admin/*`, requieren token de admin salvo el login)
 
 ### Autenticación
+
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
 | POST | `/admin/auth/login` | Login de admin → `access_token` |
@@ -41,11 +42,13 @@ Puerto: **8002**.
 | POST | `/admin/auth/admins` | Crear un nuevo administrador |
 
 ### Dashboard
+
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
 | GET | `/admin/stats/` | Métricas globales (usuarios, productos, vencimientos, categorías, etc.) |
 
 ### Usuarios
+
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
 | GET | `/admin/users/` | Listar usuarios (filtros `search`, `status_filter`) |
@@ -53,6 +56,7 @@ Puerto: **8002**.
 | PATCH | `/admin/users/{id}/status` | Habilitar/deshabilitar (`is_active`) |
 
 ### Productos
+
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
 | GET | `/admin/products/` | Listar productos (filtros `search`, `categoria`, `only_with_image`) |
@@ -60,23 +64,30 @@ Puerto: **8002**.
 | DELETE | `/admin/products/{id}` | Eliminar producto |
 
 ### Módulo de OCR
+
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
 | GET | `/admin/ocr/status` | Salud del módulo: Redis, motor configurado, decodificador de códigos y versión de cada motor |
 | POST | `/admin/ocr/scan` | Procesa una foto y devuelve **la lectura completa** (`multipart`: `file`, `doc_type`, `engine` opcional) |
+| POST | `/admin/ocr/temp/purge` | Borra las imágenes de escaneo que quedaron sin descartar → `{ "purged": n }` |
 
-El backoffice habla con **un solo servicio del módulo**: `ocr_service`, el coordinador. Los tres motores (Tesseract, EasyOCR, PaddleOCR) viven detrás de él.
+El backoffice habla con **un solo servicio del módulo**: `ocr_service`, el coordinador. Los motores (Tesseract y PaddleOCR, este último replicado) viven detrás de él.
 
 Dos diferencias deliberadas con el escaneo de la app, y las dos salen de que son usos opuestos:
 
 - **Es sincrónico.** La app tiene a alguien esperando frente a un formulario de alta, así que encola y avisa por polling. Acá alguien subió una foto justamente para ver qué sale, y partirlo en dos llamadas no le ahorra nada.
 - **Devuelve la lectura entera, no un borrador.** Confianza por campo, texto legible, qué motor ganó, con qué giro, cuántos intentos hicieron falta y qué advertencias hubo. Es lo que sirve para diagnosticar por qué una foto sale mal; el borrador de campos de alta es cosa de la app.
 
-`engine` permite forzar un motor (`tesseract`, `easyocr`, `paddleocr`, `hybrid`) para compararlos sobre la misma foto. La imagen **no se guarda en ningún lado**: va directo al coordinador, que la procesa en memoria — a diferencia del escaneo de la app, que sí pasa por la carpeta temporal de `image_storage_service` porque su procesamiento es asincrónico.
+El escaneo de diagnóstico consume el mismo cupo por minuto que el de la app (60 códigos de barras, 10 etiquetas o vencimientos, 4 comprobantes): el coordinador lo cuenta contra el `sub` del token de servicio del backoffice, así que un `429` acá significa que se está diagnosticando muy rápido, no que el módulo esté caído.
+
+`engine` permite forzar un motor (`tesseract`, `paddleocr`, `hybrid`) para compararlos sobre la misma foto. La imagen **no se guarda en ningún lado**: va directo al coordinador, que la procesa en memoria — a diferencia del escaneo de la app, que sí pasa por la carpeta temporal de `image_storage_service` porque su procesamiento es asincrónico.
+
+La purga es una red de seguridad, no parte del flujo: el worker del OCR descarta la imagen temporal de cada job en un `finally`, y esto limpia lo que queda cuando el proceso muere en medio de uno (un OOM, un redeploy). Va contra el coordinador y no contra el storage, porque el storage es dependencia suya y no de este servicio.
 
 `GET /admin/ocr/status` **no falla cuando el módulo está caído**: eso es justamente lo que el panel tiene que poder mostrar. Devuelve `disponible: false` y el diagnóstico que haya podido obtener.
 
 ### Health
+
 `GET /health`
 
 ---
@@ -103,7 +114,6 @@ PORT=8002
 ```
 
 > El bloque `ADMIN_JWT_*` es histórico: hoy el backoffice **valida el mismo JWT que emite el servicio `auth`** (`JWT_SECRET` compartido con `app_backend`) y exige además que el email esté en la whitelist de `admin_users`. Ese mismo secreto es el que le permite firmar un token de servicio de vida corta para hablar con el coordinador de OCR, sin un segundo esquema de credenciales.
-
 > El `ADMIN_JWT_SECRET` es **propio del backoffice** — no necesita coincidir con el `JWT_SECRET` de los usuarios de la app (son sesiones separadas).
 
 ---
@@ -124,7 +134,7 @@ python create_admin.py mail@dominio.com "Nombre Apellido"
 python main.py
 ```
 
-Swagger: http://localhost:8002/docs
+Swagger: <http://localhost:8002/docs>
 
 ---
 
