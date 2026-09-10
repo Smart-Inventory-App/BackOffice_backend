@@ -215,6 +215,7 @@ class BulkProductRow(BaseModel):
     marca: Optional[str] = None
     categoria: str
     stock: int
+    codigo_barras: Optional[str] = None
     vencimiento: Optional[date] = None
     descripcion: Optional[str] = None
     imagen_url: Optional[str] = None
@@ -239,6 +240,15 @@ class BulkParseResponse(BaseModel):
 class BulkCommitRequest(BaseModel):
     rows: List[BulkProductRow]
     mode: str = "entrada"  # "entrada" | "salida"
+    origen: str = Field(
+        "Carga masiva",
+        max_length=60,
+        description=(
+            "De dónde salieron estas filas. Queda como motivo del movimiento y en "
+            "el historial: la carga por archivo y la lectura de un comprobante "
+            "usan el mismo commit y hay que poder distinguirlas después."
+        ),
+    )
 
 
 class BulkCommitResult(BaseModel):

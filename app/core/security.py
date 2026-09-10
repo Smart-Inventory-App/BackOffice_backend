@@ -30,6 +30,15 @@ def _decode_email(credentials: HTTPAuthorizationCredentials) -> str:
         raise cred_exc
 
 
+def get_bearer_token(credentials: HTTPAuthorizationCredentials = Depends(_bearer)) -> str:
+    """El token tal como llegó, para reenviarlo al módulo de OCR.
+
+    El coordinador cuenta la cuota por el `sub` del token y guarda el dueño de
+    cada job.
+    """
+    return credentials.credentials
+
+
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(_bearer),
     db: Session = Depends(get_db),

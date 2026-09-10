@@ -386,6 +386,48 @@ def suggest_products(
     ]
 
 
+@router.get("/products/by-barcode/{codigo}", response_model=Optional[ProductSuggestion])
+def product_by_barcode(
+    codigo: str,
+    db: Session = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """Qué producto tuyo tiene este código de barras, si alguno.
+
+    Devuelve `null` en vez de 404 porque no encontrarlo es un resultado normal y
+    esperado: es lo que le dice al formulario que abra un alta nueva con el
+    código ya cargado, en lugar de un error que haya que interpretar.
+
+    El código se normaliza antes de buscar por la misma razón por la que se
+    normaliza al guardarlo: si no, el mismo envase leído por el escáner y escrito
+    a mano no se encuentra a sí mismo.
+    """
+    normalizado = _normalizar_codigo(codigo)
+    if not normalizado:
+        return None
+
+    product = (
+        db.query(Product)
+        .filter(Product.user_id == str(current.id), Product.codigo_barras == normalizado)
+        .order_by(Product.vencimiento.asc().nullslast(), Product.id.asc())
+        .first()
+    )
+    if not product:
+        return None
+
+    return ProductSuggestion(
+        id=product.id,
+        nombre=product.nombre,
+        marca=product.marca,
+        categoria=product.categoria,
+        ubicacion=product.ubicacion,
+        vencimiento=product.vencimiento,
+        stock=product.stock,
+        stock_minimo=product.stock_minimo,
+        dias_alerta_vencimiento=product.dias_alerta_vencimiento,
+    )
+
+
 @router.get("/products/defaults", response_model=MyDefaults)
 def my_defaults(
     db: Session = Depends(get_db),
@@ -916,17 +958,19 @@ def bulk_commit(
                     raise ValueError(f"no hay suficiente stock disponible (hay {existing.stock})")
                 existing.stock -= row.stock
                 db.commit()
-                _log_consumption(db, existing.id, uid, row.stock, "consumed", actor_email=current.email, note="Carga masiva")
+                _log_consumption(db, existing.id, uid, row.stock, "consumed", actor_email=current.email, note=body.origen)
                 merged += 1
                 _log_activity(
                     db, "product_updated", current.email, uid, current.email,
-                    f"{current.email} sacó {row.stock} unidades de \"{existing.nombre}\" (stock: {existing.stock}) por carga masiva",
+                    f"{current.email} sacó {row.stock} unidades de \"{existing.nombre}\" (stock: {existing.stock}) por {body.origen.lower()}",
                 )
                 continue
 
             existing = _find_matching_product(uid, row.nombre, row.marca, row.vencimiento, db)
             if existing:
                 existing.stock += row.stock
+                if row.codigo_barras and not existing.codigo_barras:
+                    existing.codigo_barras = _normalizar_codigo(row.codigo_barras)
                 merged += 1
                 nombre_log = existing.nombre
                 stock_log = existing.stock
@@ -938,6 +982,7 @@ def bulk_commit(
                     marca=row.marca,
                     categoria=row.categoria,
                     stock=row.stock,
+                    codigo_barras=_normalizar_codigo(row.codigo_barras),
                     vencimiento=row.vencimiento,
                     descripcion=row.descripcion,
                     imagen_url=row.imagen_url,
@@ -952,11 +997,11 @@ def bulk_commit(
                 kind_log = "cargó"
             db.commit()
             if existing:
-                _log_consumption(db, existing.id, uid, row.stock, "restocked", actor_email=current.email, note="Carga masiva")
+                _log_consumption(db, existing.id, uid, row.stock, "restocked", actor_email=current.email, note=body.origen)
             _log_activity(
                 db, "product_created" if kind_log == "cargó" else "product_updated",
                 current.email, uid, current.email,
-                f"{current.email} {kind_log} \"{nombre_log}\" (stock: {stock_log}) por carga masiva",
+                f"{current.email} {kind_log} \"{nombre_log}\" (stock: {stock_log}) por {body.origen.lower()}",
             )
         except Exception as e:
             db.rollback()

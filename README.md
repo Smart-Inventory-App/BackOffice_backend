@@ -86,6 +86,30 @@ La purga es una red de seguridad, no parte del flujo: el worker del OCR descarta
 
 `GET /admin/ocr/status` **no falla cuando el módulo está caído**: eso es justamente lo que el panel tiene que poder mostrar. Devuelve `disponible: false` y el diagnóstico que haya podido obtener.
 
+#### Carga por Foto del Usuario (`/me/products/ocr/*`)
+
+El mismo módulo, con otra finalidad: acá no se diagnostica, se arma un borrador que el usuario corrige antes de confirmar. Estos endpoints piden token de usuario, no de admin.
+
+| Método | Endpoint | Descripción |
+|--------|----------|-------------|
+| POST | `/me/products/ocr/scan` | Manda una foto (`multipart`: `file`, `doc_type`). Un `barcode` vuelve resuelto (`200`); el resto, encolado (`202`) |
+| GET | `/me/products/ocr/scan/{job_id}` | Estado del escaneo; al terminar, el borrador ya emparejado |
+| POST | `/me/products/ocr/salida` | Descarga varios productos de un mismo comprobante, con motivo `Documento Comercial` |
+| GET | `/me/products/by-barcode/{codigo}` | Qué producto tuyo tiene ese código, o `null` |
+
+Dos diferencias con el escaneo de diagnóstico:
+
+- **Viaja el token del usuario, no el de servicio.** El coordinador cuenta la cuota por minuto y guarda el dueño de cada job según el `sub` del token: firmar uno de servicio dejaría a todos los usuarios compartiendo cupo y pudiendo leer escaneos ajenos.
+- **La lectura vuelve emparejada** con el inventario de quien escanea. Un nombre suelto no alcanza para decidir a qué producto sumarle o restarle stock, y crear un producto nuevo por cada abreviatura del comercio (`YOG SER FRUT` contra `Yogur Ser frutilla`) rompe el inventario en pedazos que después nadie junta.
+
+El emparejamiento vive en `app/core/matching.py` y **no decide nada**: devuelve candidatos con su puntaje y el usuario confirma. Compara nombres normalizados (sin acentos, sin mayúsculas) y reconoce las abreviaturas de ticket, en las que cada palabra es prefijo de una del nombre completo. Debajo de `0.55` no se ofrece ningún candidato —uno malo es peor que ninguno, porque invita a confirmar sin leer— y a partir de `0.85` se preselecciona. Sin candidatos vuelve `texto_leido`, el nombre crudo, para que el usuario lo edite.
+
+Un código de barras no pasa por ahí: no se parece a un producto, **es** ese producto, así que se busca por igualdad y con el código ya normalizado. Que no aparezca ninguno es un resultado normal, no un error: es lo que le dice al formulario que abra un alta nueva con el código puesto.
+
+La salida por comprobante llega con los `product_id` que el usuario ya confirmó, no con nombres —volver a emparejar sería decidir de nuevo algo que la persona ya decidió mirando la foto— y queda asentada como consumo, que es lo que es para las métricas y para el ledger, con el motivo en la nota. Cada renglón se procesa por su cuenta y los que no se pueden aplicar vuelven explicados en `errores`, para que la pantalla pueda avisar cuántos quedaron afuera en vez de descargar de menos en silencio.
+
+Las fotos de este flujo **no se guardan**: el coordinador las sube a la carpeta temporal de `image_storage_service` y el worker las descarta al terminar el job. Lo único que persiste es lo que el usuario confirma después, contra los endpoints de alta y de salida de siempre.
+
 ### Health
 
 `GET /health`
