@@ -118,6 +118,7 @@ class MyProductResponse(BaseModel):
     descripcion: Optional[str] = None
     imagen_url: Optional[str] = None
     ubicacion: Optional[str] = None
+    codigo_barras: Optional[str] = None
     stock_minimo: Optional[int] = None
     dias_alerta_vencimiento: Optional[int] = None
     created_at: Optional[datetime] = None
@@ -136,6 +137,10 @@ class MyProductCreate(BaseModel):
     descripcion: Optional[str] = None
     imagen_url: Optional[str] = None
     ubicacion: Optional[str] = None
+    codigo_barras: Optional[str] = Field(
+        default=None,
+        description="GTIN de 8, 12, 13 o 14 dígitos. Se valida el verificador y se normaliza a 13.",
+    )
     stock_minimo: Optional[int] = Field(None, gt=0)
     dias_alerta_vencimiento: Optional[int] = Field(None, gt=0)
 
@@ -149,6 +154,7 @@ class MyProductUpdate(BaseModel):
     descripcion: Optional[str] = None
     imagen_url: Optional[str] = None
     ubicacion: Optional[str] = None
+    codigo_barras: Optional[str] = None
     stock_minimo: Optional[int] = Field(None, gt=0)
     dias_alerta_vencimiento: Optional[int] = Field(None, gt=0)
 

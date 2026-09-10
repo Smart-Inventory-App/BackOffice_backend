@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, Up
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.core import barcode
 from app.core.database import get_db
 from app.core.export import products_to_csv, products_to_xlsx
 from app.core.security import get_current_user
@@ -396,6 +397,18 @@ def my_defaults(
     return MyDefaults(last_categoria=profile.last_categoria, last_ubicacion=profile.last_ubicacion)
 
 
+def _normalizar_codigo(codigo):
+    """Valida el código de barras y lo deja en su forma canónica.
+
+    Un GTIN trae su propio dígito verificador, así que un código mal tipeado se
+    detecta acá y no seis meses después, cuando el escáner no lo encuentre.
+    """
+    try:
+        return barcode.normalizar(codigo)
+    except barcode.CodigoInvalido as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
 @router.post("/products", response_model=MyProductResponse, status_code=201)
 def create_my_product(
     data: MyProductCreate,
@@ -403,6 +416,7 @@ def create_my_product(
     current: AuthUser = Depends(get_current_user),
 ):
     uid = str(current.id)
+    data.codigo_barras = _normalizar_codigo(data.codigo_barras)
 
     profile = _get_or_create_profile(uid, db)
     profile.last_categoria = data.categoria
@@ -412,6 +426,10 @@ def create_my_product(
     existing = _find_matching_product(uid, data.nombre, data.marca, data.vencimiento, db)
     if existing:
         existing.stock += data.stock
+        # Si el producto ya estaba pero sin código, se lo completa: es dato nuevo
+        # sobre algo que ya existía, no un producto distinto.
+        if data.codigo_barras and not existing.codigo_barras:
+            existing.codigo_barras = data.codigo_barras
         db.commit()
         db.refresh(existing)
         _log_consumption(db, existing.id, uid, data.stock, "restocked", actor_email=current.email)
@@ -482,6 +500,8 @@ def update_my_product(
 ):
     product = _get_own_product(product_id, str(current.id), db)
     update_dict = data.model_dump(exclude_unset=True)
+    if "codigo_barras" in update_dict:
+        update_dict["codigo_barras"] = _normalizar_codigo(update_dict["codigo_barras"])
     new_stock = update_dict.get("stock")
     old_stock = product.stock
 
