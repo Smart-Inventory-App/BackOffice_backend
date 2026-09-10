@@ -63,6 +63,10 @@ class EngineStatus(BaseModel):
     url: str = ""
     available: bool = False
     version: str = ""
+    replicas: List[str] = Field(
+        default_factory=list,
+        description="Instancias del motor. PaddleOCR va replicado; el panel tiene que mostrarlas.",
+    )
 
 
 class OCRStatus(BaseModel):
@@ -122,6 +126,19 @@ async def scan(
         files={"file": (file.filename or "scan.jpg", content, file.content_type)},
         data=data,
     )
+
+
+@router.post("/temp/purge")
+async def purge_temp(_: AdminUser = Depends(get_current_admin)):
+    """
+    Borra las imágenes temporales de escaneo que quedaron sin descartar.
+
+    El worker del OCR descarta la suya al terminar cada job, así que el caso
+    normal ya está cubierto; esto limpia lo que queda cuando el proceso muere en
+    medio de uno. Va contra el coordinador y no contra el storage: el storage es
+    dependencia suya, no de este servicio.
+    """
+    return await _ocr("post", "/ocr/maintenance/purge-temp")
 
 
 async def _readyz() -> tuple[dict, bool]:

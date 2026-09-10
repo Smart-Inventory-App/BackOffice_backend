@@ -7,7 +7,8 @@ class Settings(BaseSettings):
 
     API_TITLE: str = "Smart Inventory — Backoffice API"
     API_VERSION: str = "1.0.0"
-    DEBUG: bool = True
+    # False por defecto. Se enciende a mano en desarrollo.
+    DEBUG: bool = False
 
     # Shared database with the rest of the platform (auth_users, products, user_profiles)
     DATABASE_URL: str = "postgresql://user:password@localhost:5432/tpp_db"
