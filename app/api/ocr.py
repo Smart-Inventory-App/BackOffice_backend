@@ -1,13 +1,19 @@
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
+from sqlalchemy import func
+from sqlalchemy.orm import Session
 
-from app.core import ocr_gateway
+from app.core import ocr_audit, ocr_gateway
 from app.core.config import settings
+from app.core.database import get_db
 from app.core.security import get_current_admin
 from app.models.admin import AdminUser
+from app.models.audit import OCRScanAudit
 
 router = APIRouter(prefix="/admin/ocr", tags=["admin-ocr"])
 
@@ -50,7 +56,8 @@ async def scan(
     file: UploadFile = File(...),
     doc_type: str = Form(default="product_label"),
     engine: Optional[str] = Form(default=None),
-    _: AdminUser = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+    admin: AdminUser = Depends(get_current_admin),
 ):
     """
     Procesa una foto y devuelve la lectura completa, sin encolar.
@@ -69,12 +76,183 @@ async def scan(
     if engine:
         data["engine"] = engine
 
-    return await ocr_gateway.request(
+    lectura = await ocr_gateway.request(
         "post",
         "/ocr/sync/upload",
         files={"file": (file.filename or "scan.jpg", content, file.content_type)},
         data=data,
     )
+
+    await run_in_threadpool(
+        ocr_audit.registrar,
+        db,
+        user_email=admin.email,
+        origen=ocr_audit.ORIGEN_PANEL,
+        doc_type=doc_type,
+        result=lectura.get("result"),
+    )
+    return lectura
+
+
+class ScanAuditEntry(BaseModel):
+    """Un renglón del historial. Breve a propósito: la foto no existe más."""
+
+    id: int
+    job_id: Optional[str] = None
+    user_email: str
+    user_id: Optional[str] = None
+    origen: str
+    doc_type: str
+    engine: Optional[str] = None
+    status: str
+    confianza: Optional[float] = None
+    processing_ms: Optional[int] = None
+    campos: Optional[int] = None
+    resumen: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ScanAuditPage(BaseModel):
+    items: List[ScanAuditEntry]
+    total: int
+
+
+class DocTypeStats(BaseModel):
+    doc_type: str
+    ejecuciones: int
+    exitosas: int
+    fallidas: int
+    ms_promedio: Optional[int] = None
+    ms_maximo: Optional[int] = None
+    confianza_promedio: Optional[float] = None
+
+
+class OCRStats(BaseModel):
+    """Cómo viene funcionando el módulo, según su propio historial."""
+
+    dias: int
+    ejecuciones: int
+    exitosas: int
+    fallidas: int
+    usuarios: int
+    ms_promedio: Optional[int] = None
+    confianza_promedio: Optional[float] = None
+    por_tipo: List[DocTypeStats] = Field(default_factory=list)
+
+
+@router.get("/audit", response_model=ScanAuditPage)
+def scan_audit(
+    user: Optional[str] = Query(default=None, description="Filtra por email de quien escaneó"),
+    doc_type: Optional[str] = Query(default=None),
+    origen: Optional[str] = Query(default=None, pattern="^(app|panel)$"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+    _: AdminUser = Depends(get_current_admin),
+):
+    """
+    Historial de ejecuciones del módulo, de la más reciente a la más vieja.
+
+    Es lo único que queda de cada escaneo: las fotos se descartan al terminar el
+    procesamiento y no se guardan en ningún lado. Por eso el renglón trae un
+    resumen recortado de lo leído y no el texto completo — alcanza para reconocer
+    de qué escaneo se trata y para auditar quién usó el módulo, que es para lo
+    que está.
+    """
+    query = db.query(OCRScanAudit)
+    if user:
+        query = query.filter(OCRScanAudit.user_email.ilike(f"%{user}%"))
+    if doc_type:
+        query = query.filter(OCRScanAudit.doc_type == doc_type)
+    if origen:
+        query = query.filter(OCRScanAudit.origen == origen)
+
+    total = query.count()
+    items = (
+        query.order_by(OCRScanAudit.created_at.desc(), OCRScanAudit.id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return ScanAuditPage(items=items, total=total)
+
+
+@router.get("/stats", response_model=OCRStats)
+def scan_stats(
+    dias: int = Query(default=7, ge=1, le=365),
+    db: Session = Depends(get_db),
+    _: AdminUser = Depends(get_current_admin),
+):
+    """
+    Tiempos y precisión medidos sobre las ejecuciones reales, no sobre un banco.
+
+    El promedio de confianza es lo más parecido a una precisión que se puede dar
+    sin conocer la respuesta correcta: es lo que el propio módulo dice de sus
+    lecturas. Se lo mira por tipo de documento porque mezclarlos no significa
+    nada — un código de barras acierta o falla y vuelve en dos décimas, y un
+    comprobante tarda un minuto y siempre necesita revisión.
+    """
+    desde = datetime.now(timezone.utc) - timedelta(days=dias)
+    base = db.query(OCRScanAudit).filter(OCRScanAudit.created_at >= desde)
+
+    filas = (
+        db.query(
+            OCRScanAudit.doc_type,
+            func.count(OCRScanAudit.id),
+            func.count(OCRScanAudit.id).filter(OCRScanAudit.status == "done"),
+            func.avg(OCRScanAudit.processing_ms),
+            func.max(OCRScanAudit.processing_ms),
+            func.avg(OCRScanAudit.confianza),
+        )
+        .filter(OCRScanAudit.created_at >= desde)
+        .group_by(OCRScanAudit.doc_type)
+        .order_by(func.count(OCRScanAudit.id).desc())
+        .all()
+    )
+
+    por_tipo = [
+        DocTypeStats(
+            doc_type=doc_type,
+            ejecuciones=ejecuciones,
+            exitosas=exitosas,
+            fallidas=ejecuciones - exitosas,
+            ms_promedio=_redondear(ms_promedio),
+            ms_maximo=_redondear(ms_maximo),
+            confianza_promedio=_porcentaje(confianza),
+        )
+        for doc_type, ejecuciones, exitosas, ms_promedio, ms_maximo, confianza in filas
+    ]
+
+    totales = base.with_entities(
+        func.count(OCRScanAudit.id),
+        func.count(OCRScanAudit.id).filter(OCRScanAudit.status == "done"),
+        func.count(func.distinct(OCRScanAudit.user_email)),
+        func.avg(OCRScanAudit.processing_ms),
+        func.avg(OCRScanAudit.confianza),
+    ).one()
+    ejecuciones, exitosas, usuarios, ms_promedio, confianza = totales
+
+    return OCRStats(
+        dias=dias,
+        ejecuciones=ejecuciones,
+        exitosas=exitosas,
+        fallidas=ejecuciones - exitosas,
+        usuarios=usuarios,
+        ms_promedio=_redondear(ms_promedio),
+        confianza_promedio=_porcentaje(confianza),
+        por_tipo=por_tipo,
+    )
+
+
+def _redondear(valor) -> Optional[int]:
+    return int(round(float(valor))) if valor is not None else None
+
+
+def _porcentaje(valor) -> Optional[float]:
+    return round(float(valor), 4) if valor is not None else None
 
 
 @router.post("/temp/purge")

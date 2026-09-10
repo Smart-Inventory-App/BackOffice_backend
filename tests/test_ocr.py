@@ -2,11 +2,15 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 from jose import jwt
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.api import ocr as ocr_api
+from app.core import ocr_audit
 from app.core.config import settings
+from app.core.database import get_db
 from app.core.security import get_current_admin
 from app.main import app
+from app.models.audit import OCRScanAudit
 
 PHOTO = ("codigo.jpg", b"\xff\xd8foto-de-prueba", "image/jpeg")
 
@@ -36,9 +40,17 @@ class FakeAdmin:
 
 
 @pytest.fixture()
-def admin_client():
-    """Cliente autenticado como admin. Estos endpoints no tocan la base."""
+def admin_client(db_session):
+    """Cliente autenticado como admin, sobre la base que los tests revierten.
+
+    El estado y el escaneo no necesitan base, pero el escaneo deja su renglón de
+    auditoría: sin esta sesión, cada corrida ensuciaría la base de verdad.
+    """
+    def override_get_db():
+        yield db_session
+
     app.dependency_overrides[get_current_admin] = lambda: FakeAdmin()
+    app.dependency_overrides[get_db] = override_get_db
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
@@ -236,3 +248,92 @@ def test_purge_goes_through_the_coordinator(admin_client, ocr_transport):
 def test_the_endpoints_require_an_admin():
     with TestClient(app) as c:
         assert c.get("/admin/ocr/status").status_code in (401, 403)
+
+
+# ── auditoría de ejecuciones ─────────────────────────────────────────────────
+
+def test_de_cada_escaneo_queda_un_renglon_breve(admin_client, ocr_transport):
+    # La foto se descarta; sin este renglón no quedaría rastro de que el módulo
+    # corrió, ni de quién lo usó.
+    ocr_transport(lambda _: httpx.Response(200, json=READING))
+
+    admin_client.post("/admin/ocr/scan", files={"file": PHOTO}, data={"doc_type": "barcode"})
+    pagina = admin_client.get("/admin/ocr/audit").json()
+
+    assert pagina["total"] == 1
+    entrada = pagina["items"][0]
+    assert entrada["user_email"] == FakeAdmin.email
+    assert entrada["origen"] == "panel"
+    assert entrada["doc_type"] == "barcode"
+    assert entrada["engine"] == "zbar"
+    assert entrada["resumen"] == "7794640172021 (EAN-13)"
+    assert entrada["processing_ms"] == 129
+
+
+def test_el_resumen_se_recorta_y_nunca_guarda_el_documento_entero(
+    admin_client, ocr_transport, db_session
+):
+    largo = dict(READING)
+    largo["result"] = dict(READING["result"], texto_legible="RENGLON DE TICKET " * 60)
+    ocr_transport(lambda _: httpx.Response(200, json=largo))
+
+    admin_client.post("/admin/ocr/scan", files={"file": PHOTO}, data={"doc_type": "receipt"})
+    resumen = admin_client.get("/admin/ocr/audit").json()["items"][0]["resumen"]
+
+    assert len(resumen) <= ocr_audit.RESUMEN_MAXIMO
+    assert resumen.endswith("…")
+
+
+def test_las_estadisticas_separan_por_tipo_de_documento(admin_client, db_session):
+    # Mezclarlos no significa nada: un código vuelve en dos décimas y siempre
+    # acierta; un comprobante tarda un minuto y siempre necesita revisión.
+    db_session.add_all([
+        OCRScanAudit(user_email="a@x.com", origen="app", doc_type="barcode",
+                     status="done", processing_ms=120, confianza=1.0),
+        OCRScanAudit(user_email="b@x.com", origen="app", doc_type="barcode",
+                     status="done", processing_ms=180, confianza=1.0),
+        OCRScanAudit(user_email="b@x.com", origen="app", doc_type="receipt",
+                     status="failed", processing_ms=60000, confianza=0.4),
+    ])
+    db_session.commit()
+
+    datos = admin_client.get("/admin/ocr/stats?dias=1").json()
+
+    assert (datos["ejecuciones"], datos["exitosas"], datos["fallidas"]) == (3, 2, 1)
+    assert datos["usuarios"] == 2
+
+    por_tipo = {t["doc_type"]: t for t in datos["por_tipo"]}
+    assert por_tipo["barcode"]["ms_promedio"] == 150
+    assert por_tipo["barcode"]["confianza_promedio"] == 1.0
+    assert por_tipo["receipt"]["fallidas"] == 1
+
+
+def test_la_auditoria_se_puede_filtrar_por_usuario(admin_client, db_session):
+    db_session.add_all([
+        OCRScanAudit(user_email="hogar@x.com", origen="app", doc_type="barcode", status="done"),
+        OCRScanAudit(user_email="comercio@x.com", origen="app", doc_type="receipt", status="done"),
+    ])
+    db_session.commit()
+
+    pagina = admin_client.get("/admin/ocr/audit?user=comercio").json()
+
+    assert pagina["total"] == 1
+    assert pagina["items"][0]["doc_type"] == "receipt"
+
+
+def test_un_fallo_del_modulo_no_se_lleva_puesto_al_escaneo(
+    admin_client, ocr_transport, monkeypatch
+):
+    # Perder el resultado de una foto por no poder escribir un renglón de
+    # historial sería un mal negocio para quien está esperando.
+    ocr_transport(lambda _: httpx.Response(200, json=READING))
+    monkeypatch.setattr(ocr_audit, "_ya_registrado", lambda *a, **k: False)
+    monkeypatch.setattr(
+        ocr_audit, "OCRScanAudit",
+        lambda **kwargs: (_ for _ in ()).throw(SQLAlchemyError("tabla caída")),
+    )
+
+    resp = admin_client.post("/admin/ocr/scan", files={"file": PHOTO})
+
+    assert resp.status_code == 200
+    assert resp.json()["result"]["engine"] == "zbar"

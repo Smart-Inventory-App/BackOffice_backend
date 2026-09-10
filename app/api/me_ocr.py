@@ -18,11 +18,12 @@ from datetime import date
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, Form, Response, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.api.me import _log_activity, _log_consumption
-from app.core import matching, ocr_gateway
+from app.core import matching, ocr_audit, ocr_gateway
 from app.core.database import get_db
 from app.core.security import get_bearer_token, get_current_user
 from app.models.app_models import AuthUser, Product
@@ -74,10 +75,19 @@ async def scan(
 
     if doc_type is ScanDocType.BARCODE:
         lectura = await ocr_gateway.request("post", "/ocr/sync/upload", token=token, **envio)
+        await run_in_threadpool(
+            ocr_audit.registrar,
+            db,
+            user_email=current.email,
+            user_id=str(current.id),
+            origen=ocr_audit.ORIGEN_APP,
+            doc_type=doc_type.value,
+            result=lectura["result"],
+        )
         return ScanState(
             status="done",
             doc_type=doc_type,
-            result=_traducir(doc_type, lectura["result"], db, str(current.id)),
+            result=await _resolver(doc_type, lectura["result"], db, current),
         )
 
     creado = await ocr_gateway.request("post", "/ocr/scan", token=token, **envio)
@@ -108,11 +118,25 @@ async def get_scan(
     doc_type = ScanDocType(job["doc_type"])
     resultado = job.get("result")
 
+    if job["status"] in ("done", "failed"):
+        await run_in_threadpool(
+            ocr_audit.registrar,
+            db,
+            user_email=current.email,
+            user_id=str(current.id),
+            origen=ocr_audit.ORIGEN_APP,
+            doc_type=doc_type.value,
+            result=resultado,
+            job_id=job["job_id"],
+            status=job["status"],
+            error=job.get("error"),
+        )
+
     return ScanState(
         job_id=job["job_id"],
         status=job["status"],
         doc_type=doc_type,
-        result=_traducir(doc_type, resultado, db, str(current.id)) if resultado else None,
+        result=await _resolver(doc_type, resultado, db, current) if resultado else None,
         error=job.get("error"),
         queue_position=job.get("queue_position"),
         estimated_wait_seconds=job.get("estimated_wait_seconds"),
@@ -183,6 +207,20 @@ def salida_por_comprobante(
 
 
 # ── de la lectura del coordinador al borrador del formulario ──────────────────
+
+async def _resolver(
+    doc_type: ScanDocType, result: dict[str, Any], db: Session, current: AuthUser
+) -> ScanResult:
+    """Traduce y empareja fuera del event loop.
+
+    Emparejar es leer el inventario del usuario y compararlo texto contra texto:
+    consultas bloqueantes y CPU. Hacerlo dentro del loop de un handler `async`
+    frenaría a todos los demás escaneos que están esperando al coordinador, que
+    es justamente lo que este servicio hace la mayor parte del tiempo.
+    """
+    return await run_in_threadpool(_traducir, doc_type, result, db, str(current.id))
+
+
 
 def _traducir(doc_type: ScanDocType, result: dict[str, Any], db: Session, uid: str) -> ScanResult:
     """

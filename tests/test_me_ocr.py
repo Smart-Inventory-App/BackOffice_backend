@@ -14,6 +14,7 @@ from app.core import matching, ocr_gateway
 from app.core.security import get_bearer_token
 from app.main import app
 from app.models.app_models import ConsumptionEvent
+from app.models.audit import OCRScanAudit
 from tests.conftest import create_product
 
 TOKEN = "token-del-usuario"
@@ -112,6 +113,28 @@ def test_un_codigo_de_barras_vuelve_resuelto_y_atado_a_su_producto(
     assert draft["coincidencia_id"] == producto.id
     assert draft["coincidencias"][0]["nombre"] == "Ibuprofeno"
     assert draft["coincidencias"][0]["por_codigo"] is True
+
+
+def test_el_codigo_de_barras_tambien_deja_su_renglon_de_auditoria(
+    user_client, coordinador, db_session, auth_user
+):
+    # No tiene job porque no se encola, pero es una ejecución del módulo igual
+    # que las otras y el historial tiene que contarla.
+    coordinador(lambda _: httpx.Response(200, json={
+        "doc_type": "barcode",
+        "result": lectura({"codigo": campo("7794640172021", 1.0)}, engine="zbar"),
+    }))
+
+    user_client.post("/me/products/ocr/scan", files={"file": FOTO},
+                     data={"doc_type": "barcode"})
+
+    fila = db_session.query(OCRScanAudit).filter(
+        OCRScanAudit.user_email == auth_user.email,
+        OCRScanAudit.doc_type == "barcode",
+    ).one()
+    assert fila.job_id is None
+    assert fila.engine == "zbar"
+    assert fila.origen == "app"
 
 
 def test_un_codigo_desconocido_vuelve_sin_coincidencias_pero_con_el_codigo(
@@ -353,3 +376,51 @@ def test_un_formato_no_soportado_se_rechaza_antes_de_la_red(user_client, coordin
 
     assert resp.status_code == 400
     assert recibidas == []
+
+
+# ── auditoría ────────────────────────────────────────────────────────────────
+
+def test_el_polling_deja_un_solo_renglon_por_job(user_client, coordinador, db_session, auth_user):
+    # La pantalla consulta cada medio segundo desde que encola hasta que termina:
+    # sin el corte por `job_id` habría un renglón de historial por consulta.
+    coordinador(lambda _: httpx.Response(200, json={
+        "job_id": "j-42", "status": "done", "doc_type": "product_label",
+        "created_at": "", "updated_at": "",
+        "result": lectura({"nombre_producto": campo("Leche entera")}),
+    }))
+
+    for _ in range(3):
+        user_client.get("/me/products/ocr/scan/j-42")
+
+    filas = db_session.query(OCRScanAudit).filter(OCRScanAudit.job_id == "j-42").all()
+    assert len(filas) == 1
+    assert filas[0].user_email == auth_user.email
+    assert filas[0].origen == "app"
+    assert filas[0].doc_type == "product_label"
+
+
+def test_un_escaneo_fallido_tambien_queda_asentado(user_client, coordinador, db_session):
+    # Es el caso que más importa auditar: sin la foto ni el renglón, una lectura
+    # que falló es indistinguible de una que nunca se pidió.
+    coordinador(lambda _: httpx.Response(200, json={
+        "job_id": "j-43", "status": "failed", "doc_type": "receipt",
+        "created_at": "", "updated_at": "", "result": None,
+        "error": "El motor no respondió",
+    }))
+
+    user_client.get("/me/products/ocr/scan/j-43")
+
+    fila = db_session.query(OCRScanAudit).filter(OCRScanAudit.job_id == "j-43").one()
+    assert fila.status == "failed"
+    assert fila.resumen == "El motor no respondió"
+
+
+def test_mientras_espera_en_la_cola_todavia_no_se_audita(user_client, coordinador, db_session):
+    coordinador(lambda _: httpx.Response(200, json={
+        "job_id": "j-44", "status": "queued", "doc_type": "receipt",
+        "created_at": "", "updated_at": "", "result": None, "queue_position": 2,
+    }))
+
+    user_client.get("/me/products/ocr/scan/j-44")
+
+    assert db_session.query(OCRScanAudit).filter(OCRScanAudit.job_id == "j-44").count() == 0

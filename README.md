@@ -22,11 +22,12 @@ Puerto: **8002**.
 | Tabla | Propietario | Uso en el backoffice |
 |-------|-------------|----------------------|
 | `admin_users` | **este servicio** | administradores del backoffice (se crea automáticamente) |
+| `ocr_scan_audit` | **este servicio** | un renglón por ejecución del módulo de OCR; es lo único que queda de cada escaneo |
 | `auth_users` | servicio `auth` | listar/habilitar/deshabilitar usuarios de la app |
 | `products` | `app_backend` | visualizar/eliminar productos cargados por los usuarios |
 | `user_profiles` | `app_backend` | datos de perfil (nombre, usuario) |
 
-> El backoffice **solo crea** la tabla `admin_users`. Las demás ya las crean sus servicios dueños; acá solo se leen/gestionan filas.
+> El backoffice **solo crea** sus propias tablas (`admin_users` y las de auditoría). Las demás ya las crean sus servicios dueños; acá solo se leen/gestionan filas.
 
 ---
 
@@ -70,6 +71,8 @@ Puerto: **8002**.
 | GET | `/admin/ocr/status` | Salud del módulo: Redis, motor configurado, decodificador de códigos y versión de cada motor |
 | POST | `/admin/ocr/scan` | Procesa una foto y devuelve **la lectura completa** (`multipart`: `file`, `doc_type`, `engine` opcional) |
 | POST | `/admin/ocr/temp/purge` | Borra las imágenes de escaneo que quedaron sin descartar → `{ "purged": n }` |
+| GET | `/admin/ocr/audit` | Historial de ejecuciones (filtros `user`, `doc_type`, `origen`) |
+| GET | `/admin/ocr/stats` | Tiempos y confianza de los últimos `dias`, por tipo de documento |
 
 El backoffice habla con **un solo servicio del módulo**: `ocr_service`, el coordinador. Los motores (Tesseract y PaddleOCR, este último replicado) viven detrás de él.
 
@@ -85,6 +88,18 @@ El escaneo de diagnóstico consume el mismo cupo por minuto que el de la app (60
 La purga es una red de seguridad, no parte del flujo: el worker del OCR descarta la imagen temporal de cada job en un `finally`, y esto limpia lo que queda cuando el proceso muere en medio de uno (un OOM, un redeploy). Va contra el coordinador y no contra el storage, porque el storage es dependencia suya y no de este servicio.
 
 `GET /admin/ocr/status` **no falla cuando el módulo está caído**: eso es justamente lo que el panel tiene que poder mostrar. Devuelve `disponible: false` y el diagnóstico que haya podido obtener.
+
+#### Auditoría de Ejecuciones
+
+Las fotos escaneadas **no se guardan en ningún lado**: el coordinador las sube a la carpeta temporal de `image_storage_service` y el worker las descarta al terminar. Eso es deliberado —una foto de la despensa o de una factura de alguien no tiene por qué quedar en ningún disco— pero deja al módulo sin historia, y sin historia no se puede saber si funciona ni quién lo usó.
+
+La tabla `ocr_scan_audit` es el reemplazo: un renglón por ejecución con quién la pidió, de qué tipo era, qué motor ganó, cuánto tardó, con qué confianza salió y un **resumen recortado** de lo leído (160 caracteres). Alcanza para auditar el uso y para calcular tiempos y precisión, y no alcanza para reconstruir la imagen — que es exactamente el punto.
+
+Se registran las tres entradas al módulo: el escaneo del panel, el código de barras del usuario (sincrónico, sin job) y los encolados, éstos al consultarse por primera vez ya terminados. El `job_id` va con índice único justamente por eso: la pantalla consulta cada medio segundo y sin ese corte quedaría un renglón por consulta.
+
+**Auditar nunca hace fallar a quien escanea.** Si la escritura del renglón falla, queda en el log del servicio y el resultado de la foto se devuelve igual: perder una lectura de un minuto por un renglón de historial sería un mal negocio.
+
+`GET /admin/ocr/stats` mide sobre esas ejecuciones reales, no sobre un banco de pruebas, y **separa por tipo de documento** porque mezclarlos no significa nada: un código de barras vuelve en décimas y o acierta o falla, y un comprobante tarda cerca de un minuto y casi siempre necesita revisión. El promedio de confianza es lo más parecido a una precisión que se puede dar sin conocer la respuesta correcta: es lo que el propio módulo dice de sus lecturas.
 
 #### Carga por Foto del Usuario (`/me/products/ocr/*`)
 
