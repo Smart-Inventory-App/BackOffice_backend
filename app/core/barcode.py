@@ -6,14 +6,19 @@ puede saber si está bien escrito sin consultar nada. Eso es lo que permite
 rechazar un código mal tipeado en el alta manual, y es la razón por la que el
 código leído por el OCR es la entrada más confiable de las cuatro.
 
-El mismo criterio corre en `ocr_service`, que es quien decodifica la foto; acá se
-repite porque el usuario también puede escribirlo a mano y ese camino no pasa por
-el módulo de OCR.
+El mismo criterio corre en `ocr_service`, que es quien decodifica la foto, y en
+`app_backend`, que tiene su propia copia de esta regla: acá se repite porque el
+usuario también puede escribirlo a mano y ese camino no pasa por el módulo de
+OCR.
 """
 from typing import Optional
 
 # Largos válidos: EAN-8, UPC-A, EAN-13 y el GTIN-14 de las cajas mayoristas.
 LARGOS_VALIDOS = (8, 12, 13, 14)
+
+# Lo que una persona escribe al copiar el código del envase.
+SEPARADORES = " -"
+_DIGITOS = "0123456789"
 
 
 class CodigoInvalido(ValueError):
@@ -43,7 +48,14 @@ def normalizar(codigo: Optional[str]) -> Optional[str]:
     if codigo is None:
         return None
 
-    limpio = "".join(c for c in str(codigo) if c.isdigit())
+    texto = str(codigo).strip()
+    if not texto:
+        return None
+
+    if any(c not in _DIGITOS and c not in SEPARADORES for c in texto):
+        raise CodigoInvalido("Un código de barras sólo lleva números.")
+
+    limpio = "".join(c for c in texto if c in _DIGITOS)
     if not limpio:
         return None
 
