@@ -825,6 +825,10 @@ def _validate_row(raw: dict, row_number: int, mode: str = "entrada") -> BulkPars
     if dias_alerta_error:
         errors.append(dias_alerta_error)
 
+    codigo_barras, codigo_error = _coerce_codigo(raw.get("codigo_barras"))
+    if codigo_error:
+        errors.append(codigo_error)
+
     # Siempre devolvemos los datos parseados (aunque haya errores) para que el
     # frontend pueda mostrarlos en un editor y el usuario los corrija a mano,
     # en vez de tener que volver a subir el archivo.
@@ -838,10 +842,31 @@ def _validate_row(raw: dict, row_number: int, mode: str = "entrada") -> BulkPars
         descripcion=_clean_str(raw.get("descripcion")),
         imagen_url=_clean_str(raw.get("imagen_url")),
         ubicacion=_clean_str(raw.get("ubicacion")),
+        codigo_barras=codigo_barras,
         stock_minimo=stock_minimo,
         dias_alerta_vencimiento=dias_alerta,
     )
     return BulkParsedRow(row_number=row_number, data=data, valid=not errors, errors=errors)
+
+
+def _coerce_codigo(raw) -> tuple[Optional[str], Optional[str]]:
+    """
+    El código de barras de una fila del archivo, validado igual que en el alta.
+
+    Excel convierte en número una celda con dígitos: `7794640172021` llega como
+    entero —y a veces como `7794640172021.0`—, así que se lo pasa a texto sin
+    decimales antes de validar. Lo que no se puede recuperar es un cero adelante
+    que Excel ya se comió: esa fila vuelve con el error del largo, que es mejor
+    que guardar un código que no va a coincidir con el escáner.
+    """
+    if raw is None:
+        return None, None
+    if isinstance(raw, float) and raw.is_integer():
+        raw = int(raw)
+    try:
+        return barcode.normalizar(str(raw)), None
+    except barcode.CodigoInvalido as e:
+        return None, f"codigo_barras: {e}"
 
 
 def _read_csv(content: bytes) -> list[dict]:
@@ -1003,6 +1028,12 @@ def bulk_commit(
                 current.email, uid, current.email,
                 f"{current.email} {kind_log} \"{nombre_log}\" (stock: {stock_log}) por {body.origen.lower()}",
             )
+        except HTTPException as e:
+            # Un código de barras inválido llega como HTTPException: `str(e)`
+            # antepone el status ("400: ...") a un mensaje que lee el usuario.
+            db.rollback()
+            failed += 1
+            errors.append(f"Fila {row.row_number}: {e.detail}")
         except Exception as e:
             db.rollback()
             failed += 1

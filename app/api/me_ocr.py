@@ -17,7 +17,7 @@ confirma después, contra los endpoints de alta y de salida de siempre.
 from datetime import date
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, File, Form, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -74,7 +74,14 @@ async def scan(
     }
 
     if doc_type is ScanDocType.BARCODE:
-        lectura = await ocr_gateway.request("post", "/ocr/sync/upload", token=token, **envio)
+        try:
+            lectura = await ocr_gateway.request("post", "/ocr/sync/upload", token=token, **envio)
+        except HTTPException as e:
+            await ocr_audit.registrar_falla(
+                db, e, user_email=current.email, user_id=str(current.id),
+                origen=ocr_audit.ORIGEN_APP, doc_type=doc_type.value,
+            )
+            raise
         await run_in_threadpool(
             ocr_audit.registrar,
             db,
@@ -370,7 +377,14 @@ def _emparejar_por_codigo(
     """
     if not codigo:
         return
-    iguales = [p for p in inventario if p.codigo_barras == codigo]
+    # Dos lotes del mismo producto comparten código y difieren en el vencimiento.
+    # Van primero los que vencen antes —y los sin fecha al final—, que es el que
+    # conviene sacar primero y el mismo orden que usa la búsqueda por código. Sin
+    # ordenar, la salida por código descontaba de un lote cualquiera.
+    iguales = sorted(
+        (p for p in inventario if p.codigo_barras == codigo),
+        key=lambda p: (p.vencimiento is None, p.vencimiento or date.max, p.id),
+    )
     draft.coincidencias = [_a_match(p, 1.0, por_codigo=True) for p in iguales]
     if iguales:
         draft.coincidencia_id = iguales[0].id

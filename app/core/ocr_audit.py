@@ -14,6 +14,7 @@ precisión, y no alcanza para reconstruir la imagen, que es exactamente el punto
 import logging
 from typing import Any, Optional
 
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -76,6 +77,22 @@ def registrar(
     except Exception as e:
         db.rollback()
         logger.warning("No se pudo auditar el escaneo %s: %s", job_id or "(sincrónico)", e)
+
+
+async def registrar_falla(db: Session, error, **datos) -> None:
+    """
+    Deja constancia de un escaneo sincrónico que el módulo no pudo resolver.
+
+    Sólo cuenta como ejecución una falla del lado del módulo (5xx: un motor o el
+    decodificador caídos). Un 429 por cupo o un 400 por formato son rechazos
+    antes de correr nada: auditarlos inflaría las fallidas con cosas que no son
+    fallas del OCR.
+    """
+    if getattr(error, "status_code", 0) < 500:
+        return
+    await run_in_threadpool(
+        registrar, db, status="failed", error=str(getattr(error, "detail", error)), **datos
+    )
 
 
 def _ya_registrado(db: Session, job_id: str) -> bool:

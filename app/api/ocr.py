@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from sqlalchemy import func
@@ -76,12 +76,17 @@ async def scan(
     if engine:
         data["engine"] = engine
 
-    lectura = await ocr_gateway.request(
-        "post",
-        "/ocr/sync/upload",
-        files={"file": (file.filename or "scan.jpg", content, file.content_type)},
-        data=data,
-    )
+    try:
+        lectura = await ocr_gateway.request(
+            "post",
+            "/ocr/sync/upload",
+            files={"file": (file.filename or "scan.jpg", content, file.content_type)},
+            data=data,
+        )
+    except HTTPException as e:
+        await ocr_audit.registrar_falla(db, e, user_email=admin.email,
+                                        origen=ocr_audit.ORIGEN_PANEL, doc_type=doc_type)
+        raise
 
     await run_in_threadpool(
         ocr_audit.registrar,

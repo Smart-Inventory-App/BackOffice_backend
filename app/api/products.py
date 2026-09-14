@@ -66,6 +66,7 @@ def _to_response(p: Product, emails: dict[str, str]) -> AdminProductResponse:
         descripcion=p.descripcion,
         imagen_url=p.imagen_url,
         ubicacion=p.ubicacion,
+        codigo_barras=p.codigo_barras,
         created_at=p.created_at,
         owner=ProductOwner(user_id=p.user_id, email=emails.get(p.user_id)),
     )

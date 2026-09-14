@@ -81,6 +81,7 @@ class AdminProductResponse(BaseModel):
     descripcion: Optional[str] = None
     imagen_url: Optional[str] = None
     ubicacion: Optional[str] = None
+    codigo_barras: Optional[str] = None
     created_at: Optional[datetime] = None
     owner: ProductOwner
 
