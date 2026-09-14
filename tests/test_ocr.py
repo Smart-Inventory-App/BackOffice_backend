@@ -337,3 +337,14 @@ def test_un_fallo_del_modulo_no_se_lleva_puesto_al_escaneo(
 
     assert resp.status_code == 200
     assert resp.json()["result"]["engine"] == "zbar"
+
+
+def test_un_escaneo_del_panel_que_falla_queda_en_la_auditoria(admin_client, ocr_transport, db_session):
+    ocr_transport(lambda _: httpx.Response(502, json={"detail": "El motor no respondió"}))
+
+    resp = admin_client.post("/admin/ocr/scan", files={"file": PHOTO}, data={"doc_type": "receipt"})
+
+    assert resp.status_code == 502
+    fila = db_session.query(OCRScanAudit).filter(OCRScanAudit.origen == "panel").one()
+    assert fila.status == "failed"
+    assert "motor" in fila.resumen

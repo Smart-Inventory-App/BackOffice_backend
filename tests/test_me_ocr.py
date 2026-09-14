@@ -424,3 +424,49 @@ def test_mientras_espera_en_la_cola_todavia_no_se_audita(user_client, coordinado
     user_client.get("/me/products/ocr/scan/j-44")
 
     assert db_session.query(OCRScanAudit).filter(OCRScanAudit.job_id == "j-44").count() == 0
+
+
+# ── huecos cerrados en la auditoría de la integración ─────────────────────────
+
+def test_con_varios_lotes_del_mismo_codigo_va_primero_el_que_vence_antes(
+    user_client, coordinador, db_session, auth_user
+):
+    # Sin ordenar, la salida por código descontaba de un lote cualquiera.
+    from datetime import date
+
+    tardio = create_product(db_session, auth_user, nombre="Ibuprofeno", stock=4,
+                            codigo_barras="7794640172021", vencimiento=date(2028, 6, 1))
+    sin_fecha = create_product(db_session, auth_user, nombre="Ibuprofeno", stock=4,
+                               codigo_barras="7794640172021", vencimiento=None)
+    pronto = create_product(db_session, auth_user, nombre="Ibuprofeno", stock=4,
+                            codigo_barras="7794640172021", vencimiento=date(2026, 12, 1))
+    coordinador(lambda _: httpx.Response(200, json={
+        "doc_type": "barcode", "result": lectura({"codigo": campo("7794640172021", 1.0)}),
+    }))
+
+    draft = user_client.post("/me/products/ocr/scan", files={"file": FOTO},
+                             data={"doc_type": "barcode"}).json()["result"]["draft"]
+
+    assert [c["id"] for c in draft["coincidencias"]] == [pronto.id, tardio.id, sin_fecha.id]
+    assert draft["coincidencia_id"] == pronto.id
+
+
+def test_un_codigo_que_falla_en_el_modulo_tambien_se_audita(user_client, coordinador, db_session, auth_user):
+    # Sin esto las "fallidas" del panel sólo contaban los trabajos encolados.
+    coordinador(lambda _: httpx.Response(503, json={"detail": "Decodificador no disponible"}))
+
+    resp = user_client.post("/me/products/ocr/scan", files={"file": FOTO}, data={"doc_type": "barcode"})
+
+    assert resp.status_code == 503
+    fila = db_session.query(OCRScanAudit).filter(OCRScanAudit.user_email == auth_user.email).one()
+    assert (fila.status, fila.doc_type) == ("failed", "barcode")
+    assert "Decodificador" in fila.resumen
+
+
+def test_un_rechazo_por_cupo_no_cuenta_como_ejecucion(user_client, coordinador, db_session, auth_user):
+    # Un 429 no llegó a correr nada: contarlo inflaría las fallidas del OCR.
+    coordinador(lambda _: httpx.Response(429, json={"detail": "Cupo agotado"}, headers={"Retry-After": "30"}))
+
+    user_client.post("/me/products/ocr/scan", files={"file": FOTO}, data={"doc_type": "barcode"})
+
+    assert db_session.query(OCRScanAudit).filter(OCRScanAudit.user_email == auth_user.email).count() == 0
