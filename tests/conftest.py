@@ -1,4 +1,9 @@
 import os
+
+os.environ.setdefault("JWT_SECRET", "test-secret")
+os.environ.setdefault("INTERNAL_SERVICE_TOKEN", "test-internal-token")
+
+import os
 import uuid
 
 os.environ["DATABASE_URL"] = os.environ.get(
