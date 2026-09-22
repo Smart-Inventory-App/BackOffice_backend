@@ -27,6 +27,8 @@ async def _ml(method: str, path: str, **kwargs):
 
 class TrainRequest(BaseModel):
     model_type: Literal["gbm", "xgboost", "lightgbm", "svr"] = "gbm"
+    data_source: Literal["real", "test"] = "real"
+    segment: Literal["individuo", "comercio"] = "individuo"
 
 
 @router.get("/models")
