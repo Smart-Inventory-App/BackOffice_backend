@@ -470,3 +470,108 @@ def test_un_rechazo_por_cupo_no_cuenta_como_ejecucion(user_client, coordinador, 
     user_client.post("/me/products/ocr/scan", files={"file": FOTO}, data={"doc_type": "barcode"})
 
     assert db_session.query(OCRScanAudit).filter(OCRScanAudit.user_email == auth_user.email).count() == 0
+
+
+# ── sello de vencimiento ─────────────────────────────────────────────────────
+
+def test_un_sello_de_vencimiento_se_encola_y_se_traduce(user_client, coordinador):
+    coordinador(lambda _: httpx.Response(202, json={"job_id": "j-venc", "status": "queued"}))
+
+    resp = user_client.post("/me/products/ocr/scan", files={"file": FOTO},
+                            data={"doc_type": "expiry_date"})
+
+    assert resp.status_code == 202
+    assert resp.json()["doc_type"] == "expiry_date"
+
+
+def test_un_sello_de_vencimiento_terminado_trae_la_fecha(user_client, coordinador):
+    coordinador(lambda _: httpx.Response(200, json={
+        "job_id": "j-venc", "status": "done", "doc_type": "expiry_date",
+        "created_at": "", "updated_at": "",
+        "result": lectura({"fecha_vencimiento": campo("2026-12-31")}),
+    }))
+
+    draft = user_client.get("/me/products/ocr/scan/j-venc").json()["result"]["draft"]
+
+    assert draft["vencimiento"] == "2026-12-31"
+
+
+def test_una_fecha_con_formato_invalido_queda_vacia_en_el_borrador(user_client, coordinador):
+    # El coordinador siempre entrega ISO; si algo raro llega igual, mejor un
+    # borrador con el campo vacío para completar a mano que uno que no carga.
+    coordinador(lambda _: httpx.Response(200, json={
+        "job_id": "j-venc-mal", "status": "done", "doc_type": "expiry_date",
+        "created_at": "", "updated_at": "",
+        "result": lectura({"fecha_vencimiento": campo("31 de diciembre")}),
+    }))
+
+    draft = user_client.get("/me/products/ocr/scan/j-venc-mal").json()["result"]["draft"]
+
+    assert draft["vencimiento"] is None
+
+
+# ── comprobante: renglones sin nombre ────────────────────────────────────────
+
+def test_un_renglon_de_comprobante_sin_nombre_se_descarta(user_client, coordinador, db_session, auth_user):
+    coordinador(lambda _: httpx.Response(200, json={
+        "job_id": "j-recibo", "status": "done", "doc_type": "receipt",
+        "created_at": "", "updated_at": "",
+        "result": lectura(
+            {"comercio": campo("Dia")},
+            items=[
+                {"nombre_producto": {"value": None, "confidence": 0.0}, "cantidad": campo(1)},
+                {"nombre_producto": campo("Leche entera"), "cantidad": campo(1)},
+            ],
+        ),
+    }))
+
+    resultado = user_client.get("/me/products/ocr/scan/j-recibo").json()["result"]
+
+    assert len(resultado["items"]) == 1
+    assert resultado["items"][0]["nombre"] == "Leche entera"
+
+
+# ── código de barras no leído ────────────────────────────────────────────────
+
+def test_un_codigo_de_barras_no_leido_no_rompe_el_emparejado(user_client, coordinador, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="Ibuprofeno", codigo_barras="7794640172021")
+    coordinador(lambda _: httpx.Response(200, json={
+        "doc_type": "barcode", "result": lectura({}),  # sin campo "codigo"
+    }))
+
+    draft = user_client.post("/me/products/ocr/scan", files={"file": FOTO},
+                             data={"doc_type": "barcode"}).json()["result"]["draft"]
+
+    assert draft["coincidencias"] == []
+    assert draft["coincidencia_id"] is None
+
+
+# ── salida por comprobante: fallo al persistir ───────────────────────────────
+
+def test_la_salida_por_comprobante_informa_un_fallo_de_base_sin_frenar_el_resto(
+    user_client, db_session, auth_user, monkeypatch
+):
+    from app.api import me_ocr as me_ocr_api
+
+    leche = create_product(db_session, auth_user, nombre="Leche entera", stock=10)
+
+    original_commit = db_session.commit
+    llamadas = {"n": 0}
+
+    def commit_que_falla_la_primera_vez():
+        llamadas["n"] += 1
+        if llamadas["n"] == 1:
+            from sqlalchemy.exc import SQLAlchemyError
+            raise SQLAlchemyError("no se pudo escribir")
+        return original_commit()
+
+    monkeypatch.setattr(db_session, "commit", commit_que_falla_la_primera_vez)
+
+    resp = user_client.post("/me/products/ocr/salida", json={
+        "items": [{"product_id": leche.id, "quantity": 2}],
+    })
+
+    cuerpo = resp.json()
+    assert cuerpo["procesados"] == 0
+    assert cuerpo["fallidos"] == 1
+    assert "no se pudo registrar la salida" in cuerpo["errores"][0]

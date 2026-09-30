@@ -308,6 +308,22 @@ def test_las_estadisticas_separan_por_tipo_de_documento(admin_client, db_session
     assert por_tipo["receipt"]["fallidas"] == 1
 
 
+def test_la_auditoria_se_puede_filtrar_por_tipo_de_documento_y_origen(admin_client, db_session):
+    db_session.add_all([
+        OCRScanAudit(user_email="a@x.com", origen="app", doc_type="barcode", status="done"),
+        OCRScanAudit(user_email="a@x.com", origen="panel", doc_type="receipt", status="done"),
+    ])
+    db_session.commit()
+
+    pagina = admin_client.get("/admin/ocr/audit?doc_type=receipt").json()
+    assert pagina["total"] == 1
+    assert pagina["items"][0]["doc_type"] == "receipt"
+
+    pagina = admin_client.get("/admin/ocr/audit?origen=panel").json()
+    assert pagina["total"] == 1
+    assert pagina["items"][0]["origen"] == "panel"
+
+
 def test_la_auditoria_se_puede_filtrar_por_usuario(admin_client, db_session):
     db_session.add_all([
         OCRScanAudit(user_email="hogar@x.com", origen="app", doc_type="barcode", status="done"),
