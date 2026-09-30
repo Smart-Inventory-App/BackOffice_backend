@@ -4,3 +4,9 @@ __pycache__/
 *.pyc
 .env
 .pytest_cache/
+
+# Testing Coverage
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
