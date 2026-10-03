@@ -308,3 +308,34 @@ def test_alerts_service_responde_con_su_propio_status_de_error(ml_client, alerts
 def test_alerts_requiere_admin():
     with TestClient(app) as c:
         assert c.post("/admin/alerts/run").status_code in (401, 403)
+
+
+# ── el error de otro servicio llega como texto legible ───────────────────────
+# Antes se reenviaba `response.text` como `detail`: el panel mostraba
+# `{"detail":"Datos insuficientes"}` con las llaves y las comillas escapadas.
+
+def test_un_error_de_ml_llega_con_su_mensaje_legible(ml_client, ml_transport):
+    ml_transport(lambda _: httpx.Response(422, json={"detail": "Datos insuficientes para entrenar"}))
+
+    resp = ml_client.post("/admin/ml/models/train")
+
+    assert resp.status_code == 422
+    assert resp.json() == {"detail": "Datos insuficientes para entrenar"}
+
+
+def test_un_error_de_ml_que_no_es_json_llega_como_texto(ml_client, ml_transport):
+    ml_transport(lambda _: httpx.Response(502, text="Bad Gateway"))
+
+    resp = ml_client.get("/admin/ml/models")
+
+    assert resp.status_code == 502
+    assert resp.json() == {"detail": "Bad Gateway"}
+
+
+def test_un_error_de_app_backend_llega_con_su_mensaje_legible(ml_client, alerts_transport):
+    alerts_transport(lambda _: httpx.Response(403, json={"detail": "Forbidden"}))
+
+    resp = ml_client.post("/admin/alerts/run")
+
+    assert resp.status_code == 403
+    assert resp.json() == {"detail": "Forbidden"}

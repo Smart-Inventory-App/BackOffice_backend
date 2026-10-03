@@ -192,3 +192,17 @@ def test_get_user_audit_combina_status_y_rol_por_fecha(admin_client, db_session,
 def test_los_endpoints_de_usuarios_requieren_admin():
     with TestClient(app) as c:
         assert c.get("/admin/users/").status_code in (401, 403)
+
+
+# ── un id que no es un UUID es un usuario que no existe, no un error del servidor ──
+
+@pytest.mark.parametrize("call", [
+    lambda c: c.get("/admin/users/no-es-un-uuid"),
+    lambda c: c.patch("/admin/users/no-es-un-uuid/status", json={"is_active": False}),
+    lambda c: c.delete("/admin/users/no-es-un-uuid/admin"),
+])
+def test_un_id_mal_formado_da_404_y_no_500(admin_client, call):
+    resp = call(admin_client)
+
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Usuario no encontrado"
