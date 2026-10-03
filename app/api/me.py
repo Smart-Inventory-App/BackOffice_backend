@@ -29,6 +29,9 @@ from app.schemas.platform import (
     CategoryCount,
     ConsumptionEventOut,
     EventCorrection,
+    MAX_CATEGORIA,
+    MAX_DESCRIPCION,
+    MAX_NOMBRE,
     MyBulkEditRequest,
     MyBulkEditResult,
     MyDefaults,
@@ -802,10 +805,14 @@ def _validate_row(raw: dict, row_number: int, mode: str = "entrada") -> BulkPars
     nombre = _clean_str(raw.get("nombre"))
     if not nombre:
         errors.append("nombre es obligatorio")
+    elif len(nombre) > MAX_NOMBRE:
+        errors.append(f"nombre supera los {MAX_NOMBRE} caracteres")
 
     categoria = _clean_str(raw.get("categoria"))
     if mode == "entrada" and not categoria:
         errors.append("categoria es obligatoria")
+    elif categoria and len(categoria) > MAX_CATEGORIA:
+        errors.append(f"categoria supera los {MAX_CATEGORIA} caracteres")
 
     stock, stock_error = _coerce_stock(raw.get("stock"))
     if stock_error:
@@ -961,6 +968,28 @@ def bulk_parse(
     return BulkParseResponse(rows=parsed)
 
 
+def _validar_fila(row: BulkProductRow, mode: str) -> None:
+    """Las reglas del alta, aplicadas a cada fila del commit.
+
+    El commit no puede confiar en que el cliente pasó antes por `/bulk/parse`: es
+    un endpoint más de la API, y una fila con stock negativo sumaría stock al
+    descontar o dejaría un producto en negativo al cargar.
+    """
+    if row.stock <= 0:
+        raise ValueError("stock debe ser mayor a 0")
+    if not row.nombre.strip():
+        raise ValueError("nombre es obligatorio")
+    if len(row.nombre) > MAX_NOMBRE:
+        raise ValueError(f"nombre supera los {MAX_NOMBRE} caracteres")
+    if mode == "entrada":
+        if not row.categoria.strip():
+            raise ValueError("categoria es obligatoria")
+        if len(row.categoria) > MAX_CATEGORIA:
+            raise ValueError(f"categoria supera los {MAX_CATEGORIA} caracteres")
+        if row.descripcion and len(row.descripcion) > MAX_DESCRIPCION:
+            raise ValueError(f"descripcion supera los {MAX_DESCRIPCION} caracteres")
+
+
 @router.post("/products/bulk/commit", response_model=BulkCommitResult)
 def bulk_commit(
     body: BulkCommitRequest,
@@ -975,6 +1004,7 @@ def bulk_commit(
 
     for row in body.rows:
         try:
+            _validar_fila(row, body.mode)
             if body.mode == "salida":
                 existing = _find_matching_product(uid, row.nombre, row.marca, row.vencimiento, db)
                 if not existing:

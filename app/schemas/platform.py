@@ -129,13 +129,20 @@ class MyProductResponse(BaseModel):
         from_attributes = True
 
 
+# Los mismos máximos que el alta de `app_backend`: un producto cargado desde el
+# backoffice tiene que poder editarse y escanearse desde la app.
+MAX_NOMBRE = 20
+MAX_CATEGORIA = 20
+MAX_DESCRIPCION = 400
+
+
 class MyProductCreate(BaseModel):
-    nombre: str
+    nombre: str = Field(..., max_length=MAX_NOMBRE)
     marca: Optional[str] = None
-    categoria: str
-    stock: int
+    categoria: str = Field(..., max_length=MAX_CATEGORIA)
+    stock: int = Field(..., gt=0)
     vencimiento: Optional[date] = None
-    descripcion: Optional[str] = None
+    descripcion: Optional[str] = Field(None, max_length=MAX_DESCRIPCION)
     imagen_url: Optional[str] = None
     ubicacion: Optional[str] = None
     codigo_barras: Optional[str] = Field(
@@ -147,12 +154,12 @@ class MyProductCreate(BaseModel):
 
 
 class MyProductUpdate(BaseModel):
-    nombre: Optional[str] = None
+    nombre: Optional[str] = Field(None, max_length=MAX_NOMBRE)
     marca: Optional[str] = None
-    categoria: Optional[str] = None
-    stock: Optional[int] = None
+    categoria: Optional[str] = Field(None, max_length=MAX_CATEGORIA)
+    stock: Optional[int] = Field(None, ge=0)
     vencimiento: Optional[date] = None
-    descripcion: Optional[str] = None
+    descripcion: Optional[str] = Field(None, max_length=MAX_DESCRIPCION)
     imagen_url: Optional[str] = None
     ubicacion: Optional[str] = None
     codigo_barras: Optional[str] = None

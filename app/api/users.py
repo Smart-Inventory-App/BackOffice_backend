@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime
 from typing import Optional
 
@@ -21,6 +22,14 @@ from app.schemas.platform import (
 )
 
 router = APIRouter(prefix="/admin/users", tags=["admin-users"])
+
+
+def _user_uuid(user_id: str) -> uuid.UUID:
+    """El id de la ruta como UUID. Uno mal formado es un usuario que no existe, no un error del servidor."""
+    try:
+        return uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
 
 
 def _product_counts(db: Session) -> dict[str, int]:
@@ -96,7 +105,7 @@ def get_user(
     db: Session = Depends(get_db),
     _: AdminUser = Depends(get_current_admin),
 ):
-    user = db.query(AuthUser).filter(AuthUser.id == user_id).first()
+    user = db.query(AuthUser).filter(AuthUser.id == _user_uuid(user_id)).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
 
@@ -140,7 +149,7 @@ def update_user_status(
     db: Session = Depends(get_db),
     current_admin: AdminUser = Depends(get_current_admin),
 ):
-    user = db.query(AuthUser).filter(AuthUser.id == user_id).first()
+    user = db.query(AuthUser).filter(AuthUser.id == _user_uuid(user_id)).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
     user.is_active = data.is_active
@@ -179,7 +188,7 @@ def remove_admin(
     db: Session = Depends(get_db),
     current_admin: AdminUser = Depends(get_current_admin),
 ):
-    user = db.query(AuthUser).filter(AuthUser.id == user_id).first()
+    user = db.query(AuthUser).filter(AuthUser.id == _user_uuid(user_id)).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
 
