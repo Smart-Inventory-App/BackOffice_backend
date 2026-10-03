@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, Up
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.core import barcode
 from app.core.database import get_db
 from app.core.export import products_to_csv, products_to_xlsx
 from app.core.security import get_current_user
@@ -28,6 +29,9 @@ from app.schemas.platform import (
     CategoryCount,
     ConsumptionEventOut,
     EventCorrection,
+    MAX_CATEGORIA,
+    MAX_DESCRIPCION,
+    MAX_NOMBRE,
     MyBulkEditRequest,
     MyBulkEditResult,
     MyDefaults,
@@ -385,6 +389,48 @@ def suggest_products(
     ]
 
 
+@router.get("/products/by-barcode/{codigo}", response_model=Optional[ProductSuggestion])
+def product_by_barcode(
+    codigo: str,
+    db: Session = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """Qué producto tuyo tiene este código de barras, si alguno.
+
+    Devuelve `null` en vez de 404 porque no encontrarlo es un resultado normal y
+    esperado: es lo que le dice al formulario que abra un alta nueva con el
+    código ya cargado, en lugar de un error que haya que interpretar.
+
+    El código se normaliza antes de buscar por la misma razón por la que se
+    normaliza al guardarlo: si no, el mismo envase leído por el escáner y escrito
+    a mano no se encuentra a sí mismo.
+    """
+    normalizado = _normalizar_codigo(codigo)
+    if not normalizado:
+        return None
+
+    product = (
+        db.query(Product)
+        .filter(Product.user_id == str(current.id), Product.codigo_barras == normalizado)
+        .order_by(Product.vencimiento.asc().nullslast(), Product.id.asc())
+        .first()
+    )
+    if not product:
+        return None
+
+    return ProductSuggestion(
+        id=product.id,
+        nombre=product.nombre,
+        marca=product.marca,
+        categoria=product.categoria,
+        ubicacion=product.ubicacion,
+        vencimiento=product.vencimiento,
+        stock=product.stock,
+        stock_minimo=product.stock_minimo,
+        dias_alerta_vencimiento=product.dias_alerta_vencimiento,
+    )
+
+
 @router.get("/products/defaults", response_model=MyDefaults)
 def my_defaults(
     db: Session = Depends(get_db),
@@ -396,6 +442,18 @@ def my_defaults(
     return MyDefaults(last_categoria=profile.last_categoria, last_ubicacion=profile.last_ubicacion)
 
 
+def _normalizar_codigo(codigo):
+    """Valida el código de barras y lo deja en su forma canónica.
+
+    Un GTIN trae su propio dígito verificador, así que un código mal tipeado se
+    detecta acá y no seis meses después, cuando el escáner no lo encuentre.
+    """
+    try:
+        return barcode.normalizar(codigo)
+    except barcode.CodigoInvalido as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
 @router.post("/products", response_model=MyProductResponse, status_code=201)
 def create_my_product(
     data: MyProductCreate,
@@ -403,6 +461,7 @@ def create_my_product(
     current: AuthUser = Depends(get_current_user),
 ):
     uid = str(current.id)
+    data.codigo_barras = _normalizar_codigo(data.codigo_barras)
 
     profile = _get_or_create_profile(uid, db)
     profile.last_categoria = data.categoria
@@ -412,6 +471,10 @@ def create_my_product(
     existing = _find_matching_product(uid, data.nombre, data.marca, data.vencimiento, db)
     if existing:
         existing.stock += data.stock
+        # Si el producto ya estaba pero sin código, se lo completa: es dato nuevo
+        # sobre algo que ya existía, no un producto distinto.
+        if data.codigo_barras and not existing.codigo_barras:
+            existing.codigo_barras = data.codigo_barras
         db.commit()
         db.refresh(existing)
         _log_consumption(db, existing.id, uid, data.stock, "restocked", actor_email=current.email)
@@ -482,6 +545,8 @@ def update_my_product(
 ):
     product = _get_own_product(product_id, str(current.id), db)
     update_dict = data.model_dump(exclude_unset=True)
+    if "codigo_barras" in update_dict:
+        update_dict["codigo_barras"] = _normalizar_codigo(update_dict["codigo_barras"])
     new_stock = update_dict.get("stock")
     old_stock = product.stock
 
@@ -740,10 +805,14 @@ def _validate_row(raw: dict, row_number: int, mode: str = "entrada") -> BulkPars
     nombre = _clean_str(raw.get("nombre"))
     if not nombre:
         errors.append("nombre es obligatorio")
+    elif len(nombre) > MAX_NOMBRE:
+        errors.append(f"nombre supera los {MAX_NOMBRE} caracteres")
 
     categoria = _clean_str(raw.get("categoria"))
     if mode == "entrada" and not categoria:
         errors.append("categoria es obligatoria")
+    elif categoria and len(categoria) > MAX_CATEGORIA:
+        errors.append(f"categoria supera los {MAX_CATEGORIA} caracteres")
 
     stock, stock_error = _coerce_stock(raw.get("stock"))
     if stock_error:
@@ -763,6 +832,10 @@ def _validate_row(raw: dict, row_number: int, mode: str = "entrada") -> BulkPars
     if dias_alerta_error:
         errors.append(dias_alerta_error)
 
+    codigo_barras, codigo_error = _coerce_codigo(raw.get("codigo_barras"))
+    if codigo_error:
+        errors.append(codigo_error)
+
     # Siempre devolvemos los datos parseados (aunque haya errores) para que el
     # frontend pueda mostrarlos en un editor y el usuario los corrija a mano,
     # en vez de tener que volver a subir el archivo.
@@ -776,10 +849,31 @@ def _validate_row(raw: dict, row_number: int, mode: str = "entrada") -> BulkPars
         descripcion=_clean_str(raw.get("descripcion")),
         imagen_url=_clean_str(raw.get("imagen_url")),
         ubicacion=_clean_str(raw.get("ubicacion")),
+        codigo_barras=codigo_barras,
         stock_minimo=stock_minimo,
         dias_alerta_vencimiento=dias_alerta,
     )
     return BulkParsedRow(row_number=row_number, data=data, valid=not errors, errors=errors)
+
+
+def _coerce_codigo(raw) -> tuple[Optional[str], Optional[str]]:
+    """
+    El código de barras de una fila del archivo, validado igual que en el alta.
+
+    Excel convierte en número una celda con dígitos: `7794640172021` llega como
+    entero —y a veces como `7794640172021.0`—, así que se lo pasa a texto sin
+    decimales antes de validar. Lo que no se puede recuperar es un cero adelante
+    que Excel ya se comió: esa fila vuelve con el error del largo, que es mejor
+    que guardar un código que no va a coincidir con el escáner.
+    """
+    if raw is None:
+        return None, None
+    if isinstance(raw, float) and raw.is_integer():
+        raw = int(raw)
+    try:
+        return barcode.normalizar(str(raw)), None
+    except barcode.CodigoInvalido as e:
+        return None, f"codigo_barras: {e}"
 
 
 def _read_csv(content: bytes) -> list[dict]:
@@ -874,6 +968,28 @@ def bulk_parse(
     return BulkParseResponse(rows=parsed)
 
 
+def _validar_fila(row: BulkProductRow, mode: str) -> None:
+    """Las reglas del alta, aplicadas a cada fila del commit.
+
+    El commit no puede confiar en que el cliente pasó antes por `/bulk/parse`: es
+    un endpoint más de la API, y una fila con stock negativo sumaría stock al
+    descontar o dejaría un producto en negativo al cargar.
+    """
+    if row.stock <= 0:
+        raise ValueError("stock debe ser mayor a 0")
+    if not row.nombre.strip():
+        raise ValueError("nombre es obligatorio")
+    if len(row.nombre) > MAX_NOMBRE:
+        raise ValueError(f"nombre supera los {MAX_NOMBRE} caracteres")
+    if mode == "entrada":
+        if not row.categoria.strip():
+            raise ValueError("categoria es obligatoria")
+        if len(row.categoria) > MAX_CATEGORIA:
+            raise ValueError(f"categoria supera los {MAX_CATEGORIA} caracteres")
+        if row.descripcion and len(row.descripcion) > MAX_DESCRIPCION:
+            raise ValueError(f"descripcion supera los {MAX_DESCRIPCION} caracteres")
+
+
 @router.post("/products/bulk/commit", response_model=BulkCommitResult)
 def bulk_commit(
     body: BulkCommitRequest,
@@ -888,6 +1004,7 @@ def bulk_commit(
 
     for row in body.rows:
         try:
+            _validar_fila(row, body.mode)
             if body.mode == "salida":
                 existing = _find_matching_product(uid, row.nombre, row.marca, row.vencimiento, db)
                 if not existing:
@@ -896,17 +1013,19 @@ def bulk_commit(
                     raise ValueError(f"no hay suficiente stock disponible (hay {existing.stock})")
                 existing.stock -= row.stock
                 db.commit()
-                _log_consumption(db, existing.id, uid, row.stock, "consumed", actor_email=current.email, note="Carga masiva")
+                _log_consumption(db, existing.id, uid, row.stock, "consumed", actor_email=current.email, note=body.origen)
                 merged += 1
                 _log_activity(
                     db, "product_updated", current.email, uid, current.email,
-                    f"{current.email} sacó {row.stock} unidades de \"{existing.nombre}\" (stock: {existing.stock}) por carga masiva",
+                    f"{current.email} sacó {row.stock} unidades de \"{existing.nombre}\" (stock: {existing.stock}) por {body.origen.lower()}",
                 )
                 continue
 
             existing = _find_matching_product(uid, row.nombre, row.marca, row.vencimiento, db)
             if existing:
                 existing.stock += row.stock
+                if row.codigo_barras and not existing.codigo_barras:
+                    existing.codigo_barras = _normalizar_codigo(row.codigo_barras)
                 merged += 1
                 nombre_log = existing.nombre
                 stock_log = existing.stock
@@ -918,6 +1037,7 @@ def bulk_commit(
                     marca=row.marca,
                     categoria=row.categoria,
                     stock=row.stock,
+                    codigo_barras=_normalizar_codigo(row.codigo_barras),
                     vencimiento=row.vencimiento,
                     descripcion=row.descripcion,
                     imagen_url=row.imagen_url,
@@ -932,12 +1052,18 @@ def bulk_commit(
                 kind_log = "cargó"
             db.commit()
             if existing:
-                _log_consumption(db, existing.id, uid, row.stock, "restocked", actor_email=current.email, note="Carga masiva")
+                _log_consumption(db, existing.id, uid, row.stock, "restocked", actor_email=current.email, note=body.origen)
             _log_activity(
                 db, "product_created" if kind_log == "cargó" else "product_updated",
                 current.email, uid, current.email,
-                f"{current.email} {kind_log} \"{nombre_log}\" (stock: {stock_log}) por carga masiva",
+                f"{current.email} {kind_log} \"{nombre_log}\" (stock: {stock_log}) por {body.origen.lower()}",
             )
+        except HTTPException as e:
+            # Un código de barras inválido llega como HTTPException: `str(e)`
+            # antepone el status ("400: ...") a un mensaje que lee el usuario.
+            db.rollback()
+            failed += 1
+            errors.append(f"Fila {row.row_number}: {e.detail}")
         except Exception as e:
             db.rollback()
             failed += 1

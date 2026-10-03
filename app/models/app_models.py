@@ -39,6 +39,7 @@ class Product(Base):
     descripcion = Column(String, nullable=True)
     imagen_url = Column(String, nullable=True)
     ubicacion = Column(String, nullable=True)
+    codigo_barras = Column(String(14), index=True, nullable=True)
     stock_minimo = Column(Integer, nullable=True)
     dias_alerta_vencimiento = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

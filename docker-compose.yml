@@ -6,10 +6,16 @@ services:
       - "8002:8002"
     env_file:
       - .env
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-user}:${DB_PASSWORD:-password}@db:5432/${DB_NAME:-tpp_db}
+      OCR_SERVICE_URL: http://tpp_ocr:8003
+      AUTH_SERVICE_URL: http://tpp_auth:8000
+      APP_BACKEND_URL: http://tpp_backend:8000
     networks:
       - tpp-net
     restart: unless-stopped
 
 networks:
   tpp-net:
+    external: true
     name: tpp-net
