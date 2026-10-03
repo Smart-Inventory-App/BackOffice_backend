@@ -1,6 +1,8 @@
-# Backoffice Backend — Smart Inventory
+# Backoffice Backend — Smart Inventory Platform
 
-Backend del módulo de **backoffice** (panel de administración) de Smart Inventory. Servicio paralelo al `app_backend`, separado en responsabilidades pero conectado a la **misma base de datos** (`tpp_db`) donde se almacena la información de los usuarios.
+[![codecov](https://codecov.io/gh/Smart-Inventory-App/BackOffice_backend/branch/main/graph/badge.svg?token=QI2CYEL6L0)](https://codecov.io/gh/Smart-Inventory-App/BackOffice_backend)
+
+**Backend** del módulo de **backoffice** (panel de administración) de Smart Inventory. Servicio paralelo al `app_backend`, separado en responsabilidades pero conectado a la **misma base de datos** (`tpp_db`) donde se almacena la información de los usuarios.
 
 Cumple el rol descrito en la propuesta: control, monitoreo y habilitación de la plataforma por parte de usuarios administradores (estado general del sistema, gestión de usuarios, supervisión de los datos e imágenes cargados, y métricas/tendencias).
 
