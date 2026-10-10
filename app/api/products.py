@@ -8,7 +8,7 @@ from app.core.database import get_db
 from app.core.export import products_to_csv, products_to_xlsx
 from app.core.security import get_current_admin
 from app.models.admin import AdminUser
-from app.models.app_models import AuthUser, Product
+from app.models.app_models import Alert, AuthUser, Product
 from app.models.audit import AdminActivityLog
 from app.schemas.platform import AdminProductResponse, PaginatedProducts, ProductOwner
 
@@ -191,5 +191,7 @@ def delete_product(
             description=f"{current_admin.email} eliminó el producto \"{p.nombre}\" de {owner_email or p.user_id}",
         )
     )
+    # Sin ON DELETE CASCADE en alerts.product_id, Postgres rechaza el borrado si el producto tiene alertas.
+    db.query(Alert).filter(Alert.product_id == p.id).delete(synchronize_session=False)
     db.delete(p)
     db.commit()
