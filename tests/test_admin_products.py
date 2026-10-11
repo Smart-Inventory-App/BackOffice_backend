@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from app.core.database import get_db
 from app.core.security import get_current_admin
 from app.main import app
-from app.models.app_models import Product
+from app.models.app_models import Alert, Product
 from app.models.audit import AdminActivityLog
 from tests.conftest import create_admin, create_product
 
@@ -159,3 +159,18 @@ def test_delete_product_inexistente_da_404(admin_client):
 def test_los_endpoints_de_productos_requieren_admin():
     with TestClient(app) as c:
         assert c.get("/admin/products/").status_code in (401, 403)
+
+
+def test_delete_product_tambien_borra_sus_alertas(admin_client, db_session, auth_user):
+    # Regresión: en Postgres la FK de alerts.product_id rechazaba el borrado (500).
+    producto = create_product(db_session, auth_user, nombre="Con alerta")
+    otro = create_product(db_session, auth_user, nombre="Otro")
+    for p in (producto, otro):
+        db_session.add(Alert(user_id=auth_user.id, product_id=p.id, type="expiry", level="warning"))
+    db_session.commit()
+
+    resp = admin_client.delete(f"/admin/products/{producto.id}")
+
+    assert resp.status_code == 204
+    assert db_session.query(Alert).filter(Alert.product_id == producto.id).count() == 0
+    assert db_session.query(Alert).filter(Alert.product_id == otro.id).count() == 1
