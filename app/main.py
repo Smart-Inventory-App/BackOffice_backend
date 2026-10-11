@@ -8,7 +8,7 @@ from app.core.database import Base, engine
 from app.models import admin as _admin  # noqa: F401
 from app.models import app_models as _app_models  # noqa: F401
 from app.models import audit as _audit  # noqa: F401
-from app.api import activity, alerts, auth, me, metrics, ml, products, stats, users
+from app.api import activity, alerts, auth, me, me_ocr, metrics, ml, ocr, products, stats, users
 
 # Creates `admin_users`. Mirrored tables (auth_users/products/user_profiles)
 # already exist (created by their owning services); create_all skips them.
@@ -22,6 +22,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Retry-After"],
 )
 
 app.include_router(auth.router)
@@ -33,6 +34,8 @@ app.include_router(activity.router)
 app.include_router(ml.router)
 app.include_router(alerts.router)
 app.include_router(metrics.router)
+app.include_router(ocr.router)
+app.include_router(me_ocr.router)
 
 
 @app.get("/health", tags=["health"])

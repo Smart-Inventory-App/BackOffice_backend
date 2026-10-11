@@ -81,6 +81,7 @@ class AdminProductResponse(BaseModel):
     descripcion: Optional[str] = None
     imagen_url: Optional[str] = None
     ubicacion: Optional[str] = None
+    codigo_barras: Optional[str] = None
     created_at: Optional[datetime] = None
     owner: ProductOwner
 
@@ -118,6 +119,7 @@ class MyProductResponse(BaseModel):
     descripcion: Optional[str] = None
     imagen_url: Optional[str] = None
     ubicacion: Optional[str] = None
+    codigo_barras: Optional[str] = None
     stock_minimo: Optional[int] = None
     dias_alerta_vencimiento: Optional[int] = None
     created_at: Optional[datetime] = None
@@ -127,28 +129,40 @@ class MyProductResponse(BaseModel):
         from_attributes = True
 
 
+# Los mismos máximos que el alta de `app_backend`: un producto cargado desde el
+# backoffice tiene que poder editarse y escanearse desde la app.
+MAX_NOMBRE = 20
+MAX_CATEGORIA = 20
+MAX_DESCRIPCION = 400
+
+
 class MyProductCreate(BaseModel):
-    nombre: str
+    nombre: str = Field(..., max_length=MAX_NOMBRE)
     marca: Optional[str] = None
-    categoria: str
-    stock: int
+    categoria: str = Field(..., max_length=MAX_CATEGORIA)
+    stock: int = Field(..., gt=0)
     vencimiento: Optional[date] = None
-    descripcion: Optional[str] = None
+    descripcion: Optional[str] = Field(None, max_length=MAX_DESCRIPCION)
     imagen_url: Optional[str] = None
     ubicacion: Optional[str] = None
+    codigo_barras: Optional[str] = Field(
+        default=None,
+        description="GTIN de 8, 12, 13 o 14 dígitos. Se valida el verificador y se normaliza a 13.",
+    )
     stock_minimo: Optional[int] = Field(None, gt=0)
     dias_alerta_vencimiento: Optional[int] = Field(None, gt=0)
 
 
 class MyProductUpdate(BaseModel):
-    nombre: Optional[str] = None
+    nombre: Optional[str] = Field(None, max_length=MAX_NOMBRE)
     marca: Optional[str] = None
-    categoria: Optional[str] = None
-    stock: Optional[int] = None
+    categoria: Optional[str] = Field(None, max_length=MAX_CATEGORIA)
+    stock: Optional[int] = Field(None, ge=0)
     vencimiento: Optional[date] = None
-    descripcion: Optional[str] = None
+    descripcion: Optional[str] = Field(None, max_length=MAX_DESCRIPCION)
     imagen_url: Optional[str] = None
     ubicacion: Optional[str] = None
+    codigo_barras: Optional[str] = None
     stock_minimo: Optional[int] = Field(None, gt=0)
     dias_alerta_vencimiento: Optional[int] = Field(None, gt=0)
 
@@ -209,6 +223,7 @@ class BulkProductRow(BaseModel):
     marca: Optional[str] = None
     categoria: str
     stock: int
+    codigo_barras: Optional[str] = None
     vencimiento: Optional[date] = None
     descripcion: Optional[str] = None
     imagen_url: Optional[str] = None
@@ -233,6 +248,15 @@ class BulkParseResponse(BaseModel):
 class BulkCommitRequest(BaseModel):
     rows: List[BulkProductRow]
     mode: str = "entrada"  # "entrada" | "salida"
+    origen: str = Field(
+        "Carga masiva",
+        max_length=60,
+        description=(
+            "De dónde salieron estas filas. Queda como motivo del movimiento y en "
+            "el historial: la carga por archivo y la lectura de un comprobante "
+            "usan el mismo commit y hay que poder distinguirlas después."
+        ),
+    )
 
 
 class BulkCommitResult(BaseModel):

@@ -39,6 +39,7 @@ class Product(Base):
     descripcion = Column(String, nullable=True)
     imagen_url = Column(String, nullable=True)
     ubicacion = Column(String, nullable=True)
+    codigo_barras = Column(String(14), index=True, nullable=True)
     stock_minimo = Column(Integer, nullable=True)
     dias_alerta_vencimiento = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -80,6 +81,21 @@ class ConsumptionEvent(Base):
     note = Column(String, nullable=True)
     # Ledger append-only: si está seteado, esta fila revierte el efecto de otra fila
     reverses_event_id = Column(Integer, ForeignKey("consumption_events.id", ondelete="SET NULL"), nullable=True)
+
+
+class Alert(Base):
+    """Owned by `app_backend` — table `alerts`. Se replica solo para poder borrar las alertas
+    de un producto antes de eliminarlo (la FK no tiene ON DELETE CASCADE)."""
+
+    __tablename__ = "alerts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("auth_users.id"))
+    product_id = Column(Integer, ForeignKey("products.id"))
+    type = Column(String(50), nullable=False)
+    level = Column(String(50), nullable=False)
+    units_wasted = Column(Integer, nullable=True)
+    days_until_stockout = Column(Integer, nullable=True)
 
 
 DEFAULT_STOCK_MINIMO = 10

@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from app.core.config import settings
 from app.core.security import get_current_admin
+from app.core.upstream import error_detail
 from app.models.admin import AdminUser
 
 router = APIRouter(prefix="/admin/ml", tags=["admin-ml"])
@@ -21,12 +22,14 @@ async def _ml(method: str, path: str, **kwargs):
     except httpx.HTTPError as e:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"ML service error: {e}")
     if r.status_code >= 400:
-        raise HTTPException(status_code=r.status_code, detail=r.text)
+        raise HTTPException(status_code=r.status_code, detail=error_detail(r))
     return r.json()
 
 
 class TrainRequest(BaseModel):
     model_type: Literal["gbm", "xgboost", "lightgbm", "svr"] = "gbm"
+    data_source: Literal["real", "test"] = "real"
+    segment: Literal["individuo", "comercio"] = "individuo"
 
 
 @router.get("/models")

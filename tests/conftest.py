@@ -1,4 +1,9 @@
 import os
+
+os.environ.setdefault("JWT_SECRET", "test-secret")
+os.environ.setdefault("INTERNAL_SERVICE_TOKEN", "test-internal-token")
+
+import os
 import uuid
 
 os.environ["DATABASE_URL"] = os.environ.get(
@@ -13,6 +18,7 @@ from sqlalchemy.orm import sessionmaker
 from app.core.database import Base, get_db
 from app.core.security import get_current_user
 from app.main import app
+from app.models.admin import AdminUser
 from app.models.app_models import AuthUser, Product
 
 
@@ -90,3 +96,18 @@ def create_product(db_session, auth_user, **overrides):
     db_session.commit()
     db_session.refresh(product)
     return product
+
+
+def create_admin(db_session, **overrides):
+    defaults = dict(
+        email="admin@smartinventory.com",
+        full_name="Admin de prueba",
+        is_active=True,
+        password_set=True,
+    )
+    defaults.update(overrides)
+    admin = AdminUser(**defaults)
+    db_session.add(admin)
+    db_session.commit()
+    db_session.refresh(admin)
+    return admin

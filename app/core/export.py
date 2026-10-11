@@ -6,7 +6,7 @@ from openpyxl import Workbook
 
 COLUMNS = [
     "id", "nombre", "marca", "categoria", "stock", "vencimiento",
-    "descripcion", "imagen_url", "ubicacion",
+    "descripcion", "imagen_url", "ubicacion", "codigo_barras",
 ]
 
 
@@ -21,6 +21,7 @@ def _row_values(p, owner_email: Optional[str]) -> list:
         p.descripcion or "",
         p.imagen_url or "",
         p.ubicacion or "",
+        p.codigo_barras or "",
     ]
     if owner_email is not None:
         values.append(owner_email)
