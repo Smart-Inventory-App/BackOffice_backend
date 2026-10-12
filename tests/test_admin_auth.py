@@ -15,7 +15,6 @@ import pytest
 from fastapi.testclient import TestClient
 from jose import jwt
 
-from app.api import auth as auth_api
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import get_current_admin, get_current_user
@@ -24,27 +23,6 @@ from app.models.admin import AdminUser
 from app.models.app_models import AuthUser
 from app.models.audit import AdminActivityLog, AdminRoleAudit
 from tests.conftest import create_admin
-
-
-@pytest.fixture()
-def auth_service(monkeypatch):
-    """Instala un servicio `auth` de mentira y devuelve las peticiones que recibió."""
-    def install(handler):
-        received = []
-
-        def record(request: httpx.Request) -> httpx.Response:
-            received.append(request)
-            return handler(request)
-
-        class FakeClient(httpx.Client):
-            def __init__(self, *args, **kwargs):
-                kwargs["transport"] = httpx.MockTransport(record)
-                super().__init__(*args, **kwargs)
-
-        monkeypatch.setattr(auth_api.httpx, "Client", FakeClient)
-        return received
-
-    return install
 
 
 @pytest.fixture()
