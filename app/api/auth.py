@@ -15,6 +15,7 @@ from app.schemas.admin import (
     CheckEmailResponse,
     LoginRequest,
     MeResponse,
+    RegisterRequest,
     SetPasswordRequest,
     TokenResponse,
 )
@@ -60,6 +61,28 @@ def check_email(body: CheckEmailRequest, db: Session = Depends(get_db)):
         return CheckEmailResponse(exists=True, is_admin=False, password_set=True)
 
     return CheckEmailResponse(exists=False, is_admin=False, password_set=False)
+
+
+_REGISTER_ERROR_MESSAGES = {
+    "auth.email_already_registered": "Ya existe una cuenta con ese email. Iniciá sesión.",
+    "auth.password_too_short": "La contraseña debe tener al menos 8 caracteres.",
+    "auth.password_missing_uppercase": "La contraseña debe incluir al menos una mayúscula.",
+    "auth.password_missing_lowercase": "La contraseña debe incluir al menos una minúscula.",
+    "auth.password_missing_digit": "La contraseña debe incluir al menos un número.",
+}
+
+
+@router.post("/register", status_code=status.HTTP_201_CREATED)
+def register(body: RegisterRequest):
+    """Alta de una cuenta nueva (usuario común, no admin) desde el backoffice.
+    Delega enteramente en `auth`, igual que el registro de la app — es la
+    misma `auth_users`. Para ser admin, otro admin lo agrega después desde
+    /admin/auth/admins."""
+    r = _auth_post("/auth/register", {"email": body.email, "password": body.password})
+    if r.status_code == 201:
+        return
+    detail = r.json().get("detail") if r.headers.get("content-type", "").startswith("application/json") else None
+    raise HTTPException(status_code=r.status_code, detail=_REGISTER_ERROR_MESSAGES.get(detail, detail or "No se pudo crear la cuenta"))
 
 
 @router.post("/set-password", status_code=status.HTTP_204_NO_CONTENT)

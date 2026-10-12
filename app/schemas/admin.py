@@ -54,3 +54,8 @@ class LoginRequest(BaseModel):
 class SetPasswordRequest(BaseModel):
     email: EmailStr
     password: str
+
+
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    password: str
