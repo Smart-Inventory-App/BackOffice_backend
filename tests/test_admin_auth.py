@@ -92,6 +92,47 @@ def test_check_un_admin_inactivo_no_cuenta_como_admin(db_client, db_session):
     assert data["is_admin"] is False
 
 
+# ── register (delega enteramente en `auth`) ───────────────────────────────────
+
+def test_register_exitoso_delega_en_auth(db_client, auth_service):
+    received = auth_service(lambda _: httpx.Response(201))
+
+    resp = db_client.post("/admin/auth/register", json={"email": "nuevo@x.com", "password": "Secreto123"})
+
+    assert resp.status_code == 201
+    assert received[0].url.path == "/auth/register"
+    assert received[0].method == "POST"
+
+
+def test_register_email_ya_existente_traduce_el_mensaje(db_client, auth_service):
+    auth_service(lambda _: httpx.Response(400, json={"detail": "auth.email_already_registered"}))
+
+    resp = db_client.post("/admin/auth/register", json={"email": "ya@x.com", "password": "Secreto123"})
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Ya existe una cuenta con ese email. Iniciá sesión."
+
+
+def test_register_contrasena_debil_traduce_el_mensaje(db_client, auth_service):
+    auth_service(lambda _: httpx.Response(400, json={"detail": "auth.password_too_short"}))
+
+    resp = db_client.post("/admin/auth/register", json={"email": "x@x.com", "password": "abc"})
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "La contraseña debe tener al menos 8 caracteres."
+
+
+def test_register_el_servicio_auth_caido_da_503(db_client, auth_service):
+    def down(request):
+        raise httpx.ConnectError("connection refused")
+
+    auth_service(down)
+
+    resp = db_client.post("/admin/auth/register", json={"email": "caido@x.com", "password": "Secreto123"})
+
+    assert resp.status_code == 503
+
+
 # ── set-password (delega enteramente en `auth`) ───────────────────────────────
 
 def test_set_password_exitoso_delega_en_auth(db_client, db_session, auth_service):
