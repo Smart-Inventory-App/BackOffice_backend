@@ -90,7 +90,10 @@ def set_password(body: SetPasswordRequest):
     """Primer inicio de sesión de un admin whitelisteado: `auth` valida la
     whitelist, las reglas de contraseña, y registra la cuenta en
     `auth_users` — es quien escribe tanto `auth_users` como `admin_users`."""
-    r = _auth_post("/auth/admin/set-password", {"email": body.email, "password": body.password})
+    r = _auth_post(
+        "/auth/admin/set-password",
+        {"email": body.email, "password": body.password, "invite_token": body.invite_token},
+    )
     if r.status_code == 204:
         return
     detail = r.json().get("detail") if r.headers.get("content-type", "").startswith("application/json") else None
@@ -101,6 +104,11 @@ def set_password(body: SetPasswordRequest):
         )
     if r.status_code == 409:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Este administrador ya definió su contraseña")
+    if r.status_code == 403 and detail == "auth.invalid_invite":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="El código de invitación no es válido o venció. Pedile uno nuevo a un administrador.",
+        )
     if r.status_code == 403:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No autorizado: el email no es administrador")
     raise HTTPException(status_code=r.status_code, detail=detail or "No se pudo definir la contraseña")

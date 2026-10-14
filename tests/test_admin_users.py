@@ -274,3 +274,46 @@ def test_un_id_mal_formado_da_404_y_no_500(admin_client, call):
 
     assert resp.status_code == 404
     assert resp.json()["detail"] == "Usuario no encontrado"
+
+
+def test_grant_admin_con_un_error_inesperado_de_auth_lo_reenvia_sin_auditar(admin_client, db_session, auth_user, auth_service):
+    auth_service(lambda _: httpx.Response(403, json={"detail": "auth.not_an_admin"}))
+
+    resp = admin_client.post(
+        f"/admin/users/{auth_user.id}/admin",
+        headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "No se pudo otorgar el rol de administrador"
+    assert db_session.query(AdminRoleAudit).count() == 0
+
+
+def test_grant_admin_reenvia_el_bearer_del_caller_a_auth(admin_client, auth_user, auth_service):
+    received = auth_service(lambda _: httpx.Response(201, json={}))
+
+    admin_client.post(f"/admin/users/{auth_user.id}/admin", headers={"Authorization": "Bearer token-del-caller"})
+
+    assert received[0].headers["authorization"] == "Bearer token-del-caller"
+    assert received[0].url.path == "/auth/admin/admins"
+
+
+def test_grant_admin_sin_authorization_es_422(admin_client, auth_user):
+    resp = admin_client.post(f"/admin/users/{auth_user.id}/admin")
+
+    assert resp.status_code == 422
+
+
+def test_grant_admin_con_el_servicio_auth_caido_da_503_sin_auditar(admin_client, db_session, auth_user, auth_service):
+    def down(request):
+        raise httpx.ConnectError("connection refused")
+
+    auth_service(down)
+
+    resp = admin_client.post(
+        f"/admin/users/{auth_user.id}/admin",
+        headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert resp.status_code == 503
+    assert db_session.query(AdminRoleAudit).count() == 0

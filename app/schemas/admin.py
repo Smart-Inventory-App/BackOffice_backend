@@ -16,6 +16,8 @@ class AdminResponse(BaseModel):
     is_active: bool
     password_set: bool
     created_at: Optional[datetime] = None
+    # Solo al dar de alta un admin sin cuenta: el código con el que define su contraseña.
+    invite_token: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -54,6 +56,7 @@ class LoginRequest(BaseModel):
 class SetPasswordRequest(BaseModel):
     email: EmailStr
     password: str
+    invite_token: str
 
 
 class RegisterRequest(BaseModel):

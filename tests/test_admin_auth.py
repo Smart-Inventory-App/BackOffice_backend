@@ -116,7 +116,7 @@ def test_register_el_servicio_auth_caido_da_503(db_client, auth_service):
 def test_set_password_exitoso_delega_en_auth(db_client, db_session, auth_service):
     received = auth_service(lambda _: httpx.Response(204))
 
-    resp = db_client.post("/admin/auth/set-password", json={"email": "nuevo@x.com", "password": "secreto123"})
+    resp = db_client.post("/admin/auth/set-password", json={"email": "nuevo@x.com", "password": "secreto123", "invite_token": "codigo-de-invitacion"})
 
     assert resp.status_code == 204
     assert received[0].url.path == "/auth/admin/set-password"
@@ -125,7 +125,7 @@ def test_set_password_exitoso_delega_en_auth(db_client, db_session, auth_service
 def test_set_password_ya_definida_es_conflicto(db_client, auth_service):
     auth_service(lambda _: httpx.Response(409, json={"detail": "auth.password_already_set"}))
 
-    resp = db_client.post("/admin/auth/set-password", json={"email": "ya@x.com", "password": "x"})
+    resp = db_client.post("/admin/auth/set-password", json={"email": "ya@x.com", "password": "x", "invite_token": "codigo-de-invitacion"})
 
     assert resp.status_code == 409
 
@@ -133,7 +133,7 @@ def test_set_password_ya_definida_es_conflicto(db_client, auth_service):
 def test_set_password_de_un_email_que_no_es_admin_es_403(db_client, auth_service):
     auth_service(lambda _: httpx.Response(403, json={"detail": "auth.not_an_admin"}))
 
-    resp = db_client.post("/admin/auth/set-password", json={"email": "nadie@x.com", "password": "x"})
+    resp = db_client.post("/admin/auth/set-password", json={"email": "nadie@x.com", "password": "x", "invite_token": "codigo-de-invitacion"})
 
     assert resp.status_code == 403
 
@@ -141,7 +141,7 @@ def test_set_password_de_un_email_que_no_es_admin_es_403(db_client, auth_service
 def test_set_password_email_ya_registrado_en_auth_se_da_por_valido(db_client, auth_service):
     auth_service(lambda _: httpx.Response(409, json={"detail": "auth.email_already_registered"}))
 
-    resp = db_client.post("/admin/auth/set-password", json={"email": "repetido@x.com", "password": "x"})
+    resp = db_client.post("/admin/auth/set-password", json={"email": "repetido@x.com", "password": "x", "invite_token": "codigo-de-invitacion"})
 
     assert resp.status_code == 409
     assert "Iniciá sesión" in resp.json()["detail"]
@@ -153,7 +153,7 @@ def test_set_password_el_servicio_auth_caido_da_503(db_client, auth_service):
 
     auth_service(down)
 
-    resp = db_client.post("/admin/auth/set-password", json={"email": "caido@x.com", "password": "x"})
+    resp = db_client.post("/admin/auth/set-password", json={"email": "caido@x.com", "password": "x", "invite_token": "codigo-de-invitacion"})
 
     assert resp.status_code == 503
 
@@ -367,3 +367,141 @@ def test_create_admin_de_un_usuario_existente_deja_auditoria_de_rol(admin_client
 def test_los_endpoints_de_admins_requieren_admin():
     with TestClient(app) as c:
         assert c.get("/admin/auth/admins").status_code in (401, 403)
+
+
+def test_set_password_con_un_error_de_auth_lo_reenvia(db_client, auth_service):
+    auth_service(lambda _: httpx.Response(400, json={"detail": "auth.password_too_short"}))
+
+    resp = db_client.post("/admin/auth/set-password", json={"email": "x@x.com", "password": "corta", "invite_token": "codigo-de-invitacion"})
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "auth.password_too_short"
+
+
+def test_set_password_con_un_error_de_auth_sin_cuerpo_usa_un_mensaje_generico(db_client, auth_service):
+    auth_service(lambda _: httpx.Response(500, text="boom"))
+
+    resp = db_client.post("/admin/auth/set-password", json={"email": "x@x.com", "password": "x", "invite_token": "codigo-de-invitacion"})
+
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == "No se pudo definir la contraseña"
+
+
+def test_create_admin_con_un_error_inesperado_de_auth_lo_reenvia_sin_crear_nada(admin_client, db_session, auth_service):
+    auth_service(lambda _: httpx.Response(403, json={"detail": "auth.not_an_admin"}))
+
+    resp = admin_client.post(
+        "/admin/auth/admins",
+        json={"email": "nuevo@x.com"},
+        headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "No se pudo crear el administrador"
+    assert db_session.query(AdminRoleAudit).count() == 0
+
+
+def test_create_admin_reenvia_el_bearer_del_caller_a_auth(admin_client, auth_service):
+    received = auth_service(lambda _: httpx.Response(201, json={
+        "id": 1, "email": "nuevo@x.com", "full_name": None, "is_active": True, "password_set": False, "created_at": None,
+    }))
+
+    admin_client.post("/admin/auth/admins", json={"email": "nuevo@x.com"}, headers={"Authorization": "Bearer token-del-caller"})
+
+    assert received[0].headers["authorization"] == "Bearer token-del-caller"
+    assert received[0].url.path == "/auth/admin/admins"
+
+
+def test_register_con_una_respuesta_de_error_sin_json_usa_un_mensaje_generico(db_client, auth_service):
+    auth_service(lambda _: httpx.Response(502, text="bad gateway"))
+
+    resp = db_client.post("/admin/auth/register", json={"email": "n@x.com", "password": "Abcdefg1"})
+
+    assert resp.status_code == 502
+    assert resp.json()["detail"] == "No se pudo crear la cuenta"
+
+
+def test_register_no_crea_nada_en_la_base_del_backoffice(db_client, db_session, auth_service):
+    auth_service(lambda _: httpx.Response(201, json={}))
+
+    db_client.post("/admin/auth/register", json={"email": "n@x.com", "password": "Abcdefg1"})
+
+    assert db_session.query(AdminUser).filter(AdminUser.email == "n@x.com").count() == 0
+
+
+# ── set-password: el código de invitación viaja a `auth` ──────────────────────
+
+def test_set_password_reenvia_el_codigo_de_invitacion_a_auth(db_client, auth_service):
+    import json
+
+    received = auth_service(lambda _: httpx.Response(204))
+
+    db_client.post(
+        "/admin/auth/set-password",
+        json={"email": "nuevo@x.com", "password": "Abcdefg1", "invite_token": "el-codigo"},
+    )
+
+    assert json.loads(received[0].content) == {"email": "nuevo@x.com", "password": "Abcdefg1", "invite_token": "el-codigo"}
+
+
+def test_set_password_sin_codigo_de_invitacion_es_422_y_no_llama_a_auth(db_client, auth_service):
+    received = auth_service(lambda _: httpx.Response(204))
+
+    resp = db_client.post("/admin/auth/set-password", json={"email": "nuevo@x.com", "password": "Abcdefg1"})
+
+    assert resp.status_code == 422
+    assert received == []
+
+
+def test_set_password_con_un_codigo_invalido_da_un_mensaje_claro(db_client, auth_service):
+    auth_service(lambda _: httpx.Response(403, json={"detail": "auth.invalid_invite"}))
+
+    resp = db_client.post(
+        "/admin/auth/set-password",
+        json={"email": "nuevo@x.com", "password": "Abcdefg1", "invite_token": "vencido"},
+    )
+
+    assert resp.status_code == 403
+    assert "código de invitación" in resp.json()["detail"]
+    assert "auth.invalid_invite" not in resp.json()["detail"]
+
+
+# ── alta de admin: el código se le entrega a quien da de alta ─────────────────
+
+def test_create_admin_devuelve_el_codigo_de_invitacion_que_entrego_auth(admin_client, auth_service):
+    auth_service(lambda _: httpx.Response(201, json={
+        "id": 1, "email": "nuevo@x.com", "full_name": None, "is_active": True,
+        "password_set": False, "created_at": None, "invite_token": "codigo-de-auth",
+    }))
+
+    resp = admin_client.post(
+        "/admin/auth/admins", json={"email": "nuevo@x.com"}, headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert resp.status_code == 201
+    assert resp.json()["invite_token"] == "codigo-de-auth"
+
+
+def test_create_admin_de_un_usuario_existente_no_trae_codigo(admin_client, db_session, auth_service):
+    db_session.add(AuthUser(email="ya@x.com", hashed_password="x", is_active=True))
+    db_session.commit()
+    auth_service(lambda _: httpx.Response(201, json={
+        "id": 2, "email": "ya@x.com", "full_name": None, "is_active": True,
+        "password_set": True, "created_at": None, "invite_token": None,
+    }))
+
+    resp = admin_client.post(
+        "/admin/auth/admins", json={"email": "ya@x.com"}, headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert resp.status_code == 201
+    assert resp.json()["invite_token"] is None
+
+
+def test_el_listado_de_admins_nunca_trae_codigos(admin_client, db_session):
+    create_admin(db_session, email="otro@x.com", password_set=False)
+
+    resp = admin_client.get("/admin/auth/admins")
+
+    assert resp.status_code == 200
+    assert all(a["invite_token"] is None for a in resp.json())
