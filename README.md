@@ -166,10 +166,11 @@ python -m venv venv
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
-# Agregar un administrador a la whitelist (requiere la db levantada).
-# NO se define contraseña acá: el admin la define en su primer login (vía auth).
-python create_admin.py # admin por defecto: admin@smartinventory.com
-python create_admin.py mail@dominio.com "Nombre Apellido"
+# Los administradores los gestiona el servicio `auth` (dueño de `admin_users`).
+# Para dar de alta el primero, desde el repo de auth (imprime un código de
+# invitación que el admin pide al definir su contraseña en su primer login):
+#   python create_admin.py mail@dominio.com "Nombre Apellido"
+# Después, un admin puede promover a cualquier usuario existente desde el panel.
 
 # Levantar (requiere el servicio auth corriendo en AUTH_SERVICE_URL)
 python main.py

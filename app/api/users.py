@@ -2,10 +2,11 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.api.auth import _auth_request
 from app.core.database import get_db
 from app.core.security import get_current_admin
 from app.models.admin import AdminUser
@@ -174,6 +175,60 @@ def update_user_status(
         email=user.email,
         is_active=bool(user.is_active),
         is_admin=user.email in _admin_emails(db),
+        created_at=user.created_at,
+        username=prof.username if prof else None,
+        first_name=prof.first_name if prof else None,
+        last_name=prof.last_name if prof else None,
+        product_count=counts.get(uid, 0),
+    )
+
+
+@router.post("/{user_id}/admin", response_model=AppUserResponse, status_code=status.HTTP_201_CREATED)
+def grant_admin(
+    user_id: str,
+    authorization: str = Header(...),
+    db: Session = Depends(get_db),
+    current_admin: AdminUser = Depends(get_current_admin),
+):
+    """Hace admin a un usuario ya existente, elegido desde el listado. La
+    escritura la hace `auth` (dueño de `admin_users`); reenviamos el bearer
+    para que valide ahí también que el caller es admin."""
+    user = db.query(AuthUser).filter(AuthUser.id == _user_uuid(user_id)).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
+    if db.query(AdminUser).filter(AdminUser.email == user.email).first():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ese usuario ya es administrador")
+
+    prof = db.query(UserProfile).filter(UserProfile.user_id == user_id).first()
+    full_name = " ".join(filter(None, [prof.first_name if prof else None, prof.last_name if prof else None])) or None
+
+    r = _auth_request(
+        "POST",
+        "/auth/admin/admins",
+        json={"email": user.email, "full_name": full_name},
+        headers={"Authorization": authorization},
+    )
+    if r.status_code == 409:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ese usuario ya es administrador")
+    if r.status_code != 201:
+        raise HTTPException(status_code=r.status_code, detail="No se pudo otorgar el rol de administrador")
+
+    db.add(
+        AdminRoleAudit(
+            user_id=str(user.id),
+            changed_by=current_admin.email,
+            action="granted",
+        )
+    )
+    db.commit()
+
+    uid = str(user.id)
+    counts = _product_counts(db)
+    return AppUserResponse(
+        id=uid,
+        email=user.email,
+        is_active=bool(user.is_active),
+        is_admin=True,
         created_at=user.created_at,
         username=prof.username if prof else None,
         first_name=prof.first_name if prof else None,

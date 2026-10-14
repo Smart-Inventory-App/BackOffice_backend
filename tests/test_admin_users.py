@@ -1,6 +1,7 @@
 """
 Panel de administración: listado, detalle y gestión de usuarios de la app.
 """
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -120,6 +121,73 @@ def test_update_user_status_inexistente_da_404(admin_client):
 
 # ── quitar rol de administrador ──────────────────────────────────────────────
 
+# ── otorgar admin ────────────────────────────────────────────────────────────
+
+def test_grant_admin_a_un_usuario_delega_en_auth_y_audita(admin_client, db_session, auth_user, auth_service):
+    received = auth_service(
+        lambda _: httpx.Response(
+            201,
+            json={"id": 9, "email": auth_user.email, "full_name": None, "is_active": True, "password_set": False, "created_at": None},
+        )
+    )
+
+    resp = admin_client.post(
+        f"/admin/users/{auth_user.id}/admin",
+        headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert resp.status_code == 201
+    assert resp.json()["is_admin"] is True
+    assert received[0].url.path == "/auth/admin/admins"
+    assert received[0].headers["authorization"] == "Bearer faketoken"
+    audit = db_session.query(AdminRoleAudit).filter(AdminRoleAudit.action == "granted").one()
+    assert audit.user_id == str(auth_user.id)
+
+
+def test_grant_admin_manda_el_nombre_del_perfil(admin_client, db_session, auth_user, auth_service):
+    db_session.add(UserProfile(user_id=str(auth_user.id), first_name="Ana", last_name="Gómez"))
+    db_session.commit()
+    received = auth_service(lambda _: httpx.Response(201, json={"id": 9, "email": auth_user.email, "full_name": "Ana Gómez", "is_active": True, "password_set": False, "created_at": None}))
+
+    admin_client.post(f"/admin/users/{auth_user.id}/admin", headers={"Authorization": "Bearer faketoken"})
+
+    import json
+    assert json.loads(received[0].content)["full_name"] == "Ana Gómez"
+
+
+def test_grant_admin_de_un_usuario_inexistente_da_404(admin_client):
+    resp = admin_client.post(
+        "/admin/users/00000000-0000-0000-0000-000000000000/admin",
+        headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert resp.status_code == 404
+
+
+def test_grant_admin_de_alguien_que_ya_es_admin_da_409_sin_llamar_a_auth(admin_client, db_session, auth_user, auth_service):
+    create_admin(db_session, email=auth_user.email)
+    received = auth_service(lambda _: httpx.Response(201, json={}))
+
+    resp = admin_client.post(
+        f"/admin/users/{auth_user.id}/admin",
+        headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert resp.status_code == 409
+    assert received == []
+
+
+def test_grant_admin_rechazado_por_auth_da_409(admin_client, auth_user, auth_service):
+    auth_service(lambda _: httpx.Response(409, json={"detail": "auth.admin_already_exists"}))
+
+    resp = admin_client.post(
+        f"/admin/users/{auth_user.id}/admin",
+        headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert resp.status_code == 409
+
+
 def test_remove_admin_quita_el_rol(admin_client, db_session, auth_user):
     create_admin(db_session, email=auth_user.email)
     create_admin(db_session, email="otro-admin@x.com")  # para que no sea el último
@@ -206,3 +274,46 @@ def test_un_id_mal_formado_da_404_y_no_500(admin_client, call):
 
     assert resp.status_code == 404
     assert resp.json()["detail"] == "Usuario no encontrado"
+
+
+def test_grant_admin_con_un_error_inesperado_de_auth_lo_reenvia_sin_auditar(admin_client, db_session, auth_user, auth_service):
+    auth_service(lambda _: httpx.Response(403, json={"detail": "auth.not_an_admin"}))
+
+    resp = admin_client.post(
+        f"/admin/users/{auth_user.id}/admin",
+        headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "No se pudo otorgar el rol de administrador"
+    assert db_session.query(AdminRoleAudit).count() == 0
+
+
+def test_grant_admin_reenvia_el_bearer_del_caller_a_auth(admin_client, auth_user, auth_service):
+    received = auth_service(lambda _: httpx.Response(201, json={}))
+
+    admin_client.post(f"/admin/users/{auth_user.id}/admin", headers={"Authorization": "Bearer token-del-caller"})
+
+    assert received[0].headers["authorization"] == "Bearer token-del-caller"
+    assert received[0].url.path == "/auth/admin/admins"
+
+
+def test_grant_admin_sin_authorization_es_422(admin_client, auth_user):
+    resp = admin_client.post(f"/admin/users/{auth_user.id}/admin")
+
+    assert resp.status_code == 422
+
+
+def test_grant_admin_con_el_servicio_auth_caido_da_503_sin_auditar(admin_client, db_session, auth_user, auth_service):
+    def down(request):
+        raise httpx.ConnectError("connection refused")
+
+    auth_service(down)
+
+    resp = admin_client.post(
+        f"/admin/users/{auth_user.id}/admin",
+        headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert resp.status_code == 503
+    assert db_session.query(AdminRoleAudit).count() == 0

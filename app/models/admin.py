@@ -4,11 +4,12 @@ from app.core.database import Base
 
 
 class AdminUser(Base):
-    """Whitelist de administradores del backoffice.
-
-    Las credenciales (contraseña) NO se guardan acá: las gestiona el servicio
-    `auth` (tabla `auth_users`), igual que para los usuarios de la app. Esta tabla
-    solo determina QUÉ emails son administradores autorizados.
+    """Mirror de solo lectura de `admin_users`, tabla owneada por el servicio
+    `auth` (ahí se crea y se escribe — ver Auth/app/routes/admin.py). Este
+    backoffice NUNCA escribe esta tabla directamente: todas las altas y el
+    "set password" van por HTTP contra `auth`. Se mantiene el modelo local
+    solo para lecturas rápidas (p. ej. `get_current_admin`, que corre en cada
+    request admin) sin pegarle a `auth` por red en cada una.
     """
 
     __tablename__ = "admin_users"
