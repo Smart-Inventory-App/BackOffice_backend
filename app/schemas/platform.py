@@ -269,7 +269,7 @@ class BulkCommitResult(BaseModel):
 class SalidaRequest(BaseModel):
     product_id: int
     quantity: int = Field(..., gt=0)
-    event_type: str = Field("consumed", pattern="^(consumed|expired)$")
+    event_type: str = Field("consumed", pattern="^(consumed|expired|sold|rented)$")
     note: Optional[str] = None
 
 
@@ -286,7 +286,7 @@ class ConsumptionEventOut(BaseModel):
 
 class EventCorrection(BaseModel):
     quantity: int = Field(..., gt=0)
-    event_type: str = Field(..., pattern="^(consumed|expired|restocked)$")
+    event_type: str = Field(..., pattern="^(consumed|expired|sold|rented|restocked)$")
     note: Optional[str] = None
 
 

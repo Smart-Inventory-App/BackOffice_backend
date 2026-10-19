@@ -589,7 +589,7 @@ def register_salida(
     db.refresh(product)
 
     _log_consumption(db, product.id, uid, data.quantity, data.event_type, actor_email=current.email, note=data.note)
-    motivo = "vencido" if data.event_type == "expired" else "consumido"
+    motivo = {"expired": "vencido", "sold": "vendido", "rented": "alquilado"}.get(data.event_type, "consumido")
     _log_activity(
         db, "product_updated", current.email, uid, current.email,
         f"{current.email} sacó {data.quantity} unidades de \"{product.nombre}\" ({motivo}, stock: {product.stock}) desde el backoffice",
