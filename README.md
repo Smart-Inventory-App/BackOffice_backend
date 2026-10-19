@@ -62,9 +62,21 @@ Puerto: **8002**.
 
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
-| GET | `/admin/products/` | Listar productos (filtros `search`, `categoria`, `only_with_image`) |
+| GET | `/admin/products/` | Listar productos (filtros `search`, `categoria`, `user_id`, `only_with_image`, `vencido`, `bajo_stock`; orden `sort_by` / `sort_dir`; páginas `limit` / `offset`) |
+| GET | `/admin/products/export` | Exportar a CSV o Excel, con los mismos filtros y el mismo orden que el listado |
+| GET | `/admin/products/filters/options` | Categorías y dueños disponibles para los filtros |
+| GET | `/admin/products/groups` | Buscar por nombre los productos agrupados, con su stock total |
+| GET | `/admin/products/group` | Todos los productos con un mismo nombre y categoría, y su stock total |
 | GET | `/admin/products/{id}` | Detalle de producto |
 | DELETE | `/admin/products/{id}` | Eliminar producto |
+
+**Orden.** `sort_by` acepta `nombre`, `stock`, `vencimiento` y `categoria`. Por nombre el orden es alfabético de verdad (no distingue mayúsculas ni tildes, la «ñ» va después de la «n») y por vencimiento no entran los productos sin fecha. El id desempata siempre, así dos páginas seguidas no repiten ni se saltean productos. Lo mismo vale para los productos propios del administrador (`/me/products`) y para las exportaciones. La lógica está en `app/core/sorting.py`.
+
+**Stock total por producto.** «El mismo producto» es el que tiene igual nombre y categoría, sin distinguir mayúsculas, tildes ni espacios sobrantes; la marca no entra en la clave.
+
+- `GET /admin/products/groups?q=` devuelve hasta 10 grupos cuyo nombre contiene `q`, con `stock_total`, `lotes`, `usuarios` y `proximo_vencimiento`.
+- `GET /admin/products/group?nombre=&categoria=` devuelve el detalle con todos los productos del grupo, ordenados por vencimiento (los que no vencen, al final), cada uno con su dueño. Responde `404` si no existe.
+- Los dos aceptan `user_id`. **Con `user_id` se cuenta solo lo de ese usuario; sin él, lo de todos los usuarios de la plataforma**, que es lo que permite ver el stock total de un producto en toda la plataforma.
 
 ### Módulo de OCR
 
