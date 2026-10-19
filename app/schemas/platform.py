@@ -86,6 +86,21 @@ class AdminProductResponse(BaseModel):
     owner: ProductOwner
 
 
+class AdminProductGroupSummary(BaseModel):
+    """Todos los productos con el mismo nombre y categoría (la marca puede variar), con su stock total."""
+
+    nombre: str
+    categoria: str
+    stock_total: int
+    lotes: int
+    usuarios: int
+    proximo_vencimiento: Optional[date] = None
+
+
+class AdminProductGroupDetail(AdminProductGroupSummary):
+    productos: List[AdminProductResponse]
+
+
 class AppUserDetail(AppUserResponse):
     products: List[AdminProductResponse]
 

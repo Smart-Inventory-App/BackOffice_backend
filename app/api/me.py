@@ -11,6 +11,7 @@ from app.core import barcode
 from app.core.database import get_db
 from app.core.export import products_to_csv, products_to_xlsx
 from app.core.security import get_current_user
+from app.core.sorting import alphabetical_key, only_sortable, page_of_products
 from app.models.app_models import (
     DEFAULT_DIAS_ALERTA_VENCIMIENTO,
     DEFAULT_STOCK_MINIMO,
@@ -226,26 +227,30 @@ def my_products(
         today = date.today()
         candidates = [p for p in query.all() if _passes_alert_filters(p, profile, bajo_stock, por_vencer, today)]
         total = len(candidates)
+        if sort_by == "vencimiento":
+            # Los productos sin fecha de vencimiento no entran en este orden
+            candidates = [p for p in candidates if p.vencimiento]
+        total = len(candidates)
+        reverse = sort_dir == "desc"
         if sort_by == "nombre":
-            candidates.sort(key=lambda p: (p.nombre or "").lower(), reverse=(sort_dir == "desc"))
+            candidates.sort(key=lambda p: (alphabetical_key(p.nombre), p.nombre or "", p.id), reverse=reverse)
         elif sort_by == "stock":
-            candidates.sort(key=lambda p: p.stock, reverse=(sort_dir == "desc"))
+            candidates.sort(key=lambda p: (p.stock, p.id), reverse=reverse)
         elif sort_by == "vencimiento":
-            candidates.sort(key=lambda p: p.vencimiento or date.max, reverse=(sort_dir == "desc"))
+            candidates.sort(key=lambda p: (p.vencimiento, p.id), reverse=reverse)
         elif sort_by == "categoria":
-            candidates.sort(key=lambda p: (p.categoria or "").lower(), reverse=(sort_dir == "desc"))
+            candidates.sort(key=lambda p: (alphabetical_key(p.categoria), p.id), reverse=reverse)
         else:
-            candidates.sort(key=lambda p: p.created_at or datetime.min, reverse=True)
+            candidates.sort(key=lambda p: (p.created_at or datetime.min, p.id), reverse=True)
         products = candidates[offset : offset + limit]
         return PaginatedMyProducts(items=products, total=total)
 
+    query = only_sortable(query, sort_by, Product.vencimiento)
     total = query.count()
-    if sort_by:
-        column = MY_SORTABLE_FIELDS[sort_by]
-        query = query.order_by(column.desc() if sort_dir == "desc" else column.asc())
-    else:
-        query = query.order_by(Product.created_at.desc())
-    products = query.offset(offset).limit(limit).all()
+    products = page_of_products(
+        query, sort_by, sort_dir, MY_SORTABLE_FIELDS,
+        (Product.created_at.desc(), Product.id.desc()), Product.id, lambda p: p.nombre, offset, limit,
+    )
     return PaginatedMyProducts(items=products, total=total)
 
 
@@ -275,12 +280,11 @@ def export_my_products(
         query = query.filter(
             (Product.vencimiento.is_(None)) | (Product.vencimiento >= date.today())
         )
-    if sort_by:
-        column = MY_SORTABLE_FIELDS[sort_by]
-        query = query.order_by(column.desc() if sort_dir == "desc" else column.asc())
-    else:
-        query = query.order_by(Product.created_at.desc())
-    products = query.all()
+    query = only_sortable(query, sort_by, Product.vencimiento)
+    products = page_of_products(
+        query, sort_by, sort_dir, MY_SORTABLE_FIELDS,
+        (Product.created_at.desc(), Product.id.desc()), Product.id, lambda p: p.nombre,
+    )
 
     if bajo_stock or por_vencer:
         profile = _get_or_create_profile(uid, db)
