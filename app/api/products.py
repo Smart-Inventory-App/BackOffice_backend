@@ -7,10 +7,17 @@ from sqlalchemy.orm import Session, Query as SAQuery
 from app.core.database import get_db
 from app.core.export import products_to_csv, products_to_xlsx
 from app.core.security import get_current_admin
+from app.core.sorting import alphabetical_key, only_sortable, page_of_products
 from app.models.admin import AdminUser
 from app.models.app_models import Alert, AuthUser, Product
 from app.models.audit import AdminActivityLog
-from app.schemas.platform import AdminProductResponse, PaginatedProducts, ProductOwner
+from app.schemas.platform import (
+    AdminProductGroupDetail,
+    AdminProductGroupSummary,
+    AdminProductResponse,
+    PaginatedProducts,
+    ProductOwner,
+)
 
 router = APIRouter(prefix="/admin/products", tags=["admin-products"])
 
@@ -53,6 +60,20 @@ def _apply_filters(
     if bajo_stock:
         query = query.filter(Product.stock <= 1)
     return query
+
+
+def _ordered(query: SAQuery, sort_by: Optional[str], sort_dir: str, offset: int = 0, limit: Optional[int] = None):
+    return page_of_products(
+        query,
+        sort_by,
+        sort_dir,
+        SORTABLE_FIELDS,
+        (Product.created_at.desc(), Product.id.desc()),
+        Product.id,
+        lambda product: product.nombre,
+        offset,
+        limit,
+    )
 
 
 def _to_response(p: Product, emails: dict[str, str]) -> AdminProductResponse:
@@ -108,14 +129,10 @@ def list_products(
     _: AdminUser = Depends(get_current_admin),
 ):
     query = _apply_filters(db.query(Product), search, categoria, user_id, only_with_image, vencido, bajo_stock)
+    query = only_sortable(query, sort_by, Product.vencimiento)
 
     total = query.count()
-    if sort_by:
-        column = SORTABLE_FIELDS[sort_by]
-        query = query.order_by(column.desc() if sort_dir == "desc" else column.asc())
-    else:
-        query = query.order_by(Product.created_at.desc())
-    products = query.offset(offset).limit(limit).all()
+    products = _ordered(query, sort_by, sort_dir, offset, limit)
     emails = _email_map(db)
     return PaginatedProducts(items=[_to_response(p, emails) for p in products], total=total)
 
@@ -135,12 +152,8 @@ def export_products(
     _: AdminUser = Depends(get_current_admin),
 ):
     query = _apply_filters(db.query(Product), search, categoria, user_id, only_with_image, vencido, bajo_stock)
-    if sort_by:
-        column = SORTABLE_FIELDS[sort_by]
-        query = query.order_by(column.desc() if sort_dir == "desc" else column.asc())
-    else:
-        query = query.order_by(Product.created_at.desc())
-    products = query.all()
+    query = only_sortable(query, sort_by, Product.vencimiento)
+    products = _ordered(query, sort_by, sort_dir)
     emails = _email_map(db)
 
     if format == "xlsx":
@@ -156,6 +169,84 @@ def export_products(
         content=content,
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ── stock total de un mismo producto (mismo nombre y categoría) ───────────────
+
+def _group_key(nombre: str, categoria: str) -> tuple[str, str]:
+    """Qué cuenta como "el mismo producto" para el stock total: igual nombre y categoría, sin distinguir
+    mayúsculas, tildes ni espacios sobrantes. La marca no entra en la clave, ni nada de lo que cambia entre lotes."""
+
+    def norm(text: Optional[str]) -> str:
+        return alphabetical_key(" ".join((text or "").split()))
+
+    return (norm(nombre), norm(categoria))
+
+
+def _groups(db: Session, user_id: Optional[str]) -> dict[tuple[str, str], list[Product]]:
+    """Productos agrupados por nombre y categoría: los de un usuario, o los de toda la plataforma si no se indica."""
+    query = db.query(Product)
+    if user_id:
+        query = query.filter(Product.user_id == user_id)
+    groups: dict[tuple[str, str], list[Product]] = {}
+    for product in query.order_by(Product.id.asc()).all():
+        groups.setdefault(_group_key(product.nombre, product.categoria), []).append(product)
+    return groups
+
+
+def _summarize(lots: list[Product]) -> AdminProductGroupSummary:
+    first = lots[0]
+    expiries = [p.vencimiento for p in lots if p.stock > 0 and p.vencimiento]
+    return AdminProductGroupSummary(
+        nombre=first.nombre,
+        categoria=first.categoria,
+        stock_total=sum(p.stock for p in lots),
+        lotes=len(lots),
+        usuarios=len({p.user_id for p in lots}),
+        proximo_vencimiento=min(expiries) if expiries else None,
+    )
+
+
+@router.get("/groups", response_model=list[AdminProductGroupSummary])
+def search_product_groups(
+    q: str = Query(..., min_length=1),
+    user_id: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    _: AdminUser = Depends(get_current_admin),
+):
+    """Productos agrupados por nombre y categoría cuyo nombre contiene `q` (sin distinguir mayúsculas ni tildes).
+
+    Con `user_id` se cuenta solo lo de ese usuario; sin él, lo de todos los usuarios de la plataforma.
+    """
+    needle = alphabetical_key(" ".join(q.split()))
+    if not needle:
+        return []
+    found = [_summarize(lots) for key, lots in _groups(db, user_id).items() if needle in key[0]]
+    found.sort(key=lambda g: (alphabetical_key(g.nombre), alphabetical_key(g.categoria)))
+    return found[:10]
+
+
+@router.get("/group", response_model=AdminProductGroupDetail)
+def get_product_group(
+    nombre: str = Query(..., min_length=1),
+    categoria: str = Query(..., min_length=1),
+    user_id: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    _: AdminUser = Depends(get_current_admin),
+):
+    """Todos los productos con ese nombre y categoría (de cualquier marca) y su stock total.
+
+    Salen ordenados por vencimiento (los que no vencen, al final).
+    """
+    lots = _groups(db, user_id).get(_group_key(nombre, categoria))
+    if not lots:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Producto no encontrado")
+    emails = _email_map(db)
+    ordered = sorted(lots, key=lambda p: (p.vencimiento is None, p.vencimiento or date.max, p.id))
+    return AdminProductGroupDetail(
+        **_summarize(lots).model_dump(),
+        productos=[_to_response(p, emails) for p in ordered],
     )
 
 

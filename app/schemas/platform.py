@@ -86,6 +86,21 @@ class AdminProductResponse(BaseModel):
     owner: ProductOwner
 
 
+class AdminProductGroupSummary(BaseModel):
+    """Todos los productos con el mismo nombre y categoría (la marca puede variar), con su stock total."""
+
+    nombre: str
+    categoria: str
+    stock_total: int
+    lotes: int
+    usuarios: int
+    proximo_vencimiento: Optional[date] = None
+
+
+class AdminProductGroupDetail(AdminProductGroupSummary):
+    productos: List[AdminProductResponse]
+
+
 class AppUserDetail(AppUserResponse):
     products: List[AdminProductResponse]
 
@@ -269,7 +284,7 @@ class BulkCommitResult(BaseModel):
 class SalidaRequest(BaseModel):
     product_id: int
     quantity: int = Field(..., gt=0)
-    event_type: str = Field("consumed", pattern="^(consumed|expired)$")
+    event_type: str = Field("consumed", pattern="^(consumed|expired|sold|rented)$")
     note: Optional[str] = None
 
 
@@ -286,7 +301,7 @@ class ConsumptionEventOut(BaseModel):
 
 class EventCorrection(BaseModel):
     quantity: int = Field(..., gt=0)
-    event_type: str = Field(..., pattern="^(consumed|expired|restocked)$")
+    event_type: str = Field(..., pattern="^(consumed|expired|sold|rented|restocked)$")
     note: Optional[str] = None
 
 

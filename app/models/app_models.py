@@ -62,6 +62,10 @@ class UserProfile(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
 
+# Salidas que cuentan como demanda real (métricas): uso, venta y alquiler. "expired" es una pérdida.
+CONSUMPTION_EVENT_TYPES = ("consumed", "sold", "rented")
+
+
 class ConsumptionEvent(Base):
     """Owned by `app_backend` — table `consumption_events`. Registra cada
     movimiento de stock (entrada/salida) para poder analizar consumo."""
@@ -72,7 +76,8 @@ class ConsumptionEvent(Base):
     product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
     user_id = Column(String, nullable=False, index=True)
     quantity = Column(Integer, nullable=False)
-    # "consumed": bajó el stock por uso/vencimiento; "restocked": entró stock nuevo
+    # "consumed": bajó el stock por uso; "sold": se vendió; "rented": se alquiló; "expired": venció;
+    # "restocked": entró stock nuevo
     event_type = Column(String, nullable=False, server_default="consumed")
     consumed_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     # Quién generó el movimiento (distinto de user_id, que es de quién es el inventario)

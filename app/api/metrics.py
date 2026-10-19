@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.security import get_current_user
-from app.models.app_models import AuthUser, ConsumptionEvent, Product
+from app.models.app_models import CONSUMPTION_EVENT_TYPES, AuthUser, ConsumptionEvent, Product
 from app.schemas.platform import ConsumoPorDia, MyMetrics, ProductoConsumo
 
 router = APIRouter(prefix="/me", tags=["me"])
@@ -36,12 +36,12 @@ def my_metrics(
     )
     events = base.all()
 
-    total_consumido = sum(e.quantity for e in events if e.event_type == "consumed")
+    total_consumido = sum(e.quantity for e in events if e.event_type in CONSUMPTION_EVENT_TYPES)
     total_entradas = sum(e.quantity for e in events if e.event_type == "restocked")
 
     per_day: dict[str, int] = {}
     for e in events:
-        if e.event_type != "consumed":
+        if e.event_type not in CONSUMPTION_EVENT_TYPES:
             continue
         day = e.consumed_at.date().isoformat()
         per_day[day] = per_day.get(day, 0) + e.quantity
@@ -53,7 +53,7 @@ def my_metrics(
 
     per_product: dict[int, int] = {}
     for e in events:
-        if e.event_type != "consumed":
+        if e.event_type not in CONSUMPTION_EVENT_TYPES:
             continue
         per_product[e.product_id] = per_product.get(e.product_id, 0) + e.quantity
 
