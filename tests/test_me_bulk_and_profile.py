@@ -622,3 +622,49 @@ def test_bulk_commit_un_error_inesperado_se_informa_sin_frenar_el_resto(client, 
     assert body["failed"] == 1
     assert body["created"] == 1
     assert "Fila 2: boom" in body["errors"][0]
+
+
+# ── orden alfabético y sin fecha de vencimiento ──────────────────────────────
+
+def mis_nombres(client, **params):
+    return [p["nombre"] for p in client.get("/me/products", params=params).json()["items"]]
+
+
+def test_my_products_ordena_por_nombre_sin_distinguir_mayusculas_ni_tildes(client, db_session, auth_user):
+    for nombre in ["zanahoria", "Ñoquis", "Álvaro", "banana", "Arroz"]:
+        create_product(db_session, auth_user, nombre=nombre)
+
+    assert mis_nombres(client, sort_by="nombre") == ["Álvaro", "Arroz", "banana", "Ñoquis", "zanahoria"]
+    assert mis_nombres(client, sort_by="nombre", sort_dir="desc") == ["zanahoria", "Ñoquis", "banana", "Arroz", "Álvaro"]
+
+
+def test_my_products_por_vencimiento_deja_afuera_los_que_no_vencen(client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="Sin fecha")
+    create_product(db_session, auth_user, nombre="Tarde", vencimiento=date(2027, 5, 1))
+    create_product(db_session, auth_user, nombre="Pronto", vencimiento=date(2027, 1, 1))
+
+    data = client.get("/me/products", params={"sort_by": "vencimiento"}).json()
+
+    assert [p["nombre"] for p in data["items"]] == ["Pronto", "Tarde"]
+    assert data["total"] == 2
+
+
+def test_my_products_las_paginas_no_repiten_productos(client, db_session, auth_user):
+    for i in range(7):
+        create_product(db_session, auth_user, nombre=f"P{i}", categoria="Igual", stock=1)
+
+    primera = client.get("/me/products", params={"sort_by": "stock", "limit": 4}).json()["items"]
+    segunda = client.get("/me/products", params={"sort_by": "stock", "limit": 4, "offset": 4}).json()["items"]
+
+    assert len({p["id"] for p in primera + segunda}) == 7
+
+
+def test_my_products_con_bajo_stock_tambien_ordena_alfabeticamente_y_sin_los_que_no_vencen(client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="banana", stock=1, vencimiento=date(2027, 2, 1))
+    create_product(db_session, auth_user, nombre="Álvaro", stock=1, vencimiento=date(2027, 1, 1))
+    create_product(db_session, auth_user, nombre="Sin fecha", stock=1)
+
+    assert mis_nombres(client, bajo_stock=True, sort_by="nombre") == ["Álvaro", "banana", "Sin fecha"]
+    data = client.get("/me/products", params={"bajo_stock": True, "sort_by": "vencimiento"}).json()
+    assert [p["nombre"] for p in data["items"]] == ["Álvaro", "banana"]
+    assert data["total"] == 2
