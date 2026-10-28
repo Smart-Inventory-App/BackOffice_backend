@@ -1,7 +1,6 @@
-from datetime import date, timedelta
+from datetime import datetime, time, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -11,6 +10,16 @@ from app.schemas.platform import ConsumoPorDia, MyMetrics, ProductoConsumo
 
 router = APIRouter(prefix="/me", tags=["me"])
 
+# Hora argentina (UTC-3, sin horario de verano): los días del gráfico se cuentan con ella. Los eventos se guardan en UTC.
+AR_TZ = timezone(timedelta(hours=-3))
+
+
+def _ar_day(moment: datetime):
+    """Día calendario argentino de un instante. Sin zona horaria se asume UTC."""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(AR_TZ).date()
+
 
 @router.get("/metrics", response_model=MyMetrics)
 def my_metrics(
@@ -19,8 +28,9 @@ def my_metrics(
     current: AuthUser = Depends(get_current_user),
 ):
     uid = str(current.id)
-    today = date.today()
+    today = datetime.now(AR_TZ).date()
     since = today - timedelta(days=period - 1)
+    since_start = datetime.combine(since, time.min, tzinfo=AR_TZ).astimezone(timezone.utc).replace(tzinfo=None)
 
     reversed_ids = db.query(ConsumptionEvent.reverses_event_id).filter(
         ConsumptionEvent.reverses_event_id.isnot(None)
@@ -29,7 +39,7 @@ def my_metrics(
         db.query(ConsumptionEvent)
         .filter(
             ConsumptionEvent.user_id == uid,
-            func.date(ConsumptionEvent.consumed_at) >= since,
+            ConsumptionEvent.consumed_at >= since_start,
             ConsumptionEvent.reverses_event_id.is_(None),
             ConsumptionEvent.id.notin_(reversed_ids),
         )
@@ -43,7 +53,7 @@ def my_metrics(
     for e in events:
         if e.event_type not in CONSUMPTION_EVENT_TYPES:
             continue
-        day = e.consumed_at.date().isoformat()
+        day = _ar_day(e.consumed_at).isoformat()
         per_day[day] = per_day.get(day, 0) + e.quantity
 
     consumo_por_dia = []

@@ -70,3 +70,14 @@ def test_an_unknown_kind_of_exit_is_rejected_by_the_backoffice(client, db_sessio
     resp = client.post("/me/products/salida", json={"product_id": product.id, "quantity": 1, "event_type": "stolen"})
 
     assert resp.status_code == 422
+
+def test_the_day_of_an_event_is_the_argentine_one():
+    from datetime import datetime, timedelta, timezone
+
+    from app.api.metrics import _ar_day
+
+    # 02:30 UTC del 13 son las 23:30 del 12 en Argentina; sin zona horaria se asume UTC
+    assert _ar_day(datetime(2026, 10, 13, 2, 30)).isoformat() == "2026-10-12"
+    assert _ar_day(datetime(2026, 10, 13, 3, 0, tzinfo=timezone.utc)).isoformat() == "2026-10-13"
+    assert _ar_day(datetime(2026, 10, 13, 1, 0, tzinfo=timezone(timedelta(hours=2)))).isoformat() == "2026-10-12"
+
