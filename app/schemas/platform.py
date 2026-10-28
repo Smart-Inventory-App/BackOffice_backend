@@ -263,6 +263,8 @@ class ProductSuggestion(BaseModel):
     stock: int = 0
     stock_minimo: Optional[int] = None
     dias_alerta_vencimiento: Optional[int] = None
+    codigo_barras: Optional[str] = None
+    imagen_url: Optional[str] = None
 
 
 class MyDefaults(BaseModel):
@@ -349,6 +351,11 @@ class BulkCommitResult(BaseModel):
     merged: int
     failed: int
     errors: List[str]
+
+
+class RestockRequest(BaseModel):
+    """Stock que entra a un producto que el usuario ya tiene cargado."""
+    quantity: int = Field(..., gt=0, le=999_999)
 
 
 class SalidaRequest(BaseModel):

@@ -120,6 +120,8 @@ Los eventos se guardan en UTC, pero **el día de cada movimiento, el «hoy» de 
 | GET | `/me/profile`, PUT | Perfil con los límites de la app: nombre, apellido y usuario hasta 20 caracteres, días de las alertas de 2 a 90, hora del chequeo de 0 a 23 (Argentina), tipo de cuenta |
 | GET | `/me/profile/username-available?username=` | Si el nombre de usuario se puede usar; guardarlo repetido es un `409` (no distingue mayúsculas) |
 | POST | `/me/products/image` | Sube la **imagen de un producto como archivo** (`multipart`, JPG/PNG/WebP de hasta `MAX_IMAGE_MB`) al servicio de almacenamiento con el token del usuario y devuelve `{ "url": ... }` |
+| GET | `/me/products/by-barcode/{codigo}/all` | Todos los productos del usuario con ese código de barras (por ejemplo, varios lotes), el que vence antes primero |
+| POST | `/me/products/{id}/restock` | `{quantity}`: suma stock a un producto ya cargado («Producto existente» del flujo de producto) y deja el movimiento |
 | GET | `/me/products/match?q=` | Productos del usuario parecidos a un texto leído de una etiqueta: compara nombre, marca y descripción |
 | GET | `/me/products/groups?q=`, `/me/products/group` | Stock total de «el mismo producto» entre los lotes del usuario |
 

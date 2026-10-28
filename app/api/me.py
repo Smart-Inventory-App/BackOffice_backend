@@ -56,6 +56,7 @@ from app.schemas.platform import (
     PaginatedMyProducts,
     PROFILE_TEXT_MAX,
     ProductSuggestion,
+    RestockRequest,
     SalidaRequest,
     StockChangeOut,
 )
@@ -511,6 +512,8 @@ def _suggestion(p: Product) -> ProductSuggestion:
         stock=p.stock,
         stock_minimo=p.stock_minimo,
         dias_alerta_vencimiento=p.dias_alerta_vencimiento,
+        codigo_barras=p.codigo_barras,
+        imagen_url=p.imagen_url,
     )
 
 
@@ -764,6 +767,28 @@ def product_by_barcode(
     )
 
 
+@router.get("/products/by-barcode/{codigo}/all", response_model=list[ProductSuggestion])
+def products_by_barcode(
+    codigo: str,
+    db: Session = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """Todos los productos tuyos con este código de barras (por ejemplo, varios lotes), el que vence antes primero.
+
+    Es lo que usa «Producto existente» para que, con un código leído o escrito a mano, se pueda elegir de cuál se trata.
+    """
+    normalizado = _normalizar_codigo(codigo)
+    if not normalizado:
+        return []
+    products = (
+        db.query(Product)
+        .filter(Product.user_id == str(current.id), Product.codigo_barras == normalizado)
+        .order_by(Product.vencimiento.asc().nullslast(), Product.id.asc())
+        .all()
+    )
+    return [_suggestion(p) for p in products]
+
+
 @router.get("/products/defaults", response_model=MyDefaults)
 def my_defaults(
     db: Session = Depends(get_db),
@@ -952,6 +977,30 @@ def update_my_product(
             db, "product_updated", current.email, str(current.id), current.email,
             f"{current.email} editó \"{product.nombre}\" ({', '.join(changed_fields)}) desde el dashboard",
         )
+    return product
+
+
+@router.post("/products/{product_id}/restock", response_model=MyProductResponse, status_code=status.HTTP_201_CREATED)
+def restock_my_product(
+    product_id: int,
+    data: RestockRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """Suma stock a un producto que ya está cargado (el «Producto existente» del flujo de producto)."""
+    uid = str(current.id)
+    product = _get_own_product(product_id, uid, db)
+    product.stock += data.quantity
+    db.commit()
+    db.refresh(product)
+
+    _log_consumption(db, product.id, uid, data.quantity, "restocked", actor_email=current.email)
+    background_tasks.add_task(refresh_user_alerts, uid)
+    _log_activity(
+        db, "product_updated", current.email, uid, current.email,
+        f"{current.email} ingresó {data.quantity} unidades a \"{product.nombre}\" (stock: {product.stock}) desde el dashboard",
+    )
     return product
 
 
