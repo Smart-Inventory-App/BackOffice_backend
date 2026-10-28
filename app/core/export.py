@@ -4,24 +4,26 @@ from typing import Optional
 
 from openpyxl import Workbook
 
+# Las mismas columnas, y en este orden, que pide la carga de archivos: un archivo exportado se puede volver a subir
 COLUMNS = [
-    "id", "nombre", "marca", "categoria", "stock", "vencimiento",
-    "descripcion", "imagen_url", "ubicacion", "codigo_barras",
+    "nombre", "stock", "categoria", "marca", "vencimiento", "codigo_barras",
+    "descripcion", "ubicacion", "dias_stock_minimo", "dias_alerta_vencimiento",
 ]
 
 
 def _row_values(p, owner_email: Optional[str]) -> list:
+    # Lo que un producto no tiene va vacío
     values = [
-        p.id,
         p.nombre,
-        p.marca or "",
-        p.categoria,
         p.stock,
+        p.categoria,
+        p.marca or "",
         p.vencimiento.isoformat() if p.vencimiento else "",
-        p.descripcion or "",
-        p.imagen_url or "",
-        p.ubicacion or "",
         p.codigo_barras or "",
+        p.descripcion or "",
+        p.ubicacion or "",
+        p.stock_minimo if p.stock_minimo is not None else "",
+        p.dias_alerta_vencimiento if p.dias_alerta_vencimiento is not None else "",
     ]
     if owner_email is not None:
         values.append(owner_email)

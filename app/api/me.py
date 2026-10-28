@@ -1,6 +1,8 @@
 import csv
 import io
 import re
+import unicodedata
+import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
@@ -355,11 +357,11 @@ def export_my_products(
     if format == "xlsx":
         content = products_to_xlsx(products)
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        filename = "mis_productos.xlsx"
+        filename = "productos.xlsx"
     else:
         content = products_to_csv(products)
         media_type = "text/csv"
-        filename = "mis_productos.csv"
+        filename = "productos.csv"
 
     return Response(
         content=content,
@@ -1260,7 +1262,10 @@ def _validate_row(raw: dict, row_number: int, mode: str = "entrada") -> BulkPars
     if venc_error:
         errors.append(venc_error)
 
-    stock_minimo, stock_minimo_error = _coerce_optional_int(raw.get("stock_minimo"), "stock_minimo")
+    # «dias_stock_minimo» es el nombre de la columna; «stock_minimo» se sigue aceptando por los archivos viejos
+    stock_minimo, stock_minimo_error = _coerce_optional_int(
+        raw.get("dias_stock_minimo", raw.get("stock_minimo")), "dias_stock_minimo"
+    )
     if stock_minimo_error:
         errors.append(stock_minimo_error)
 
@@ -1285,7 +1290,6 @@ def _validate_row(raw: dict, row_number: int, mode: str = "entrada") -> BulkPars
         stock=stock or 0,
         vencimiento=vencimiento,
         descripcion=_clean_str(raw.get("descripcion")),
-        imagen_url=_clean_str(raw.get("imagen_url")),
         ubicacion=_clean_str(raw.get("ubicacion")),
         codigo_barras=codigo_barras,
         stock_minimo=stock_minimo,
@@ -1314,10 +1318,25 @@ def _coerce_codigo(raw) -> tuple[Optional[str], Optional[str]]:
         return None, f"codigo_barras: {e}"
 
 
+# Las columnas del archivo, las mismas que genera la exportación. Las tres primeras son obligatorias en una entrada
+# (en una salida alcanza con el nombre y el stock: la categoría no se usa para encontrar el producto).
+FILE_COLUMNS = (
+    "nombre", "stock", "categoria", "marca", "vencimiento", "codigo_barras",
+    "descripcion", "ubicacion", "dias_stock_minimo", "dias_alerta_vencimiento",
+)
+REQUIRED_FILE_COLUMNS = {"entrada": ("nombre", "stock", "categoria"), "salida": ("nombre", "stock")}
+
+
+def _header(raw) -> str:
+    """El nombre de una columna sin importar mayúsculas, acentos ni espacios: «Categoría» y «categoria» son la misma."""
+    text = unicodedata.normalize("NFKD", str(raw or "")).encode("ascii", "ignore").decode().strip().lower()
+    return re.sub(r"\s+", "_", text)
+
+
 def _read_csv(content: bytes) -> list[dict]:
     text = content.decode("utf-8-sig")
     reader = csv.DictReader(io.StringIO(text))
-    return [{(k or "").strip().lower(): v for k, v in row.items()} for row in reader]
+    return [{_header(k): v for k, v in row.items()} for row in reader]
 
 
 def _read_xlsx(content: bytes) -> list[dict]:
@@ -1330,7 +1349,7 @@ def _read_xlsx(content: bytes) -> list[dict]:
         header_row = next(rows_iter)
     except StopIteration:
         return []
-    headers = [str(h).strip().lower() if h is not None else "" for h in header_row]
+    headers = [_header(h) for h in header_row]
 
     rows = []
     for row in rows_iter:
@@ -1359,6 +1378,16 @@ def bulk_parse(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Formato de archivo no soportado: usá .csv o .xlsx",
         )
+
+    # Las columnas obligatorias tienen que estar; las demás pueden faltar y van sin datos, y el orden no importa
+    if raw_rows:
+        present = {name for name in raw_rows[0] if name}
+        missing = [name for name in REQUIRED_FILE_COLUMNS[mode] if name not in present]
+        if missing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Al archivo le faltan columnas obligatorias: {', '.join(missing)}",
+            )
 
     uid = str(current.id)
     local_stock: dict[tuple[str, Optional[str], Optional[date]], int] = {}

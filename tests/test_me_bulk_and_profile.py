@@ -805,3 +805,185 @@ def test_el_borrado_en_lote_pide_productos_y_que_existan(client, db_session, aut
 
     assert client.post("/me/products/bulk-delete", json={"product_ids": []}).status_code == 400
     assert client.post("/me/products/bulk-delete", json={"product_ids": [ajeno.id, 999999]}).status_code == 404
+
+
+# ── exportación e importación con las mismas columnas ─────────────────────────
+
+EXPORT_COLUMNS = [
+    "nombre", "stock", "categoria", "marca", "vencimiento", "codigo_barras",
+    "descripcion", "ubicacion", "dias_stock_minimo", "dias_alerta_vencimiento",
+]
+
+
+def _export_csv_rows(client, **params):
+    import csv as csv_module
+    import io as io_module
+
+    text = client.get("/me/products/export", params={"format": "csv", **params}).content.decode("utf-8-sig")
+    return list(csv_module.reader(io_module.StringIO(text)))
+
+
+def test_la_exportacion_trae_las_columnas_de_la_carga_en_ese_orden_y_vacio_lo_que_no_existe(client, db_session, auth_user):
+    create_product(
+        db_session, auth_user, nombre="Leche", stock=4, categoria="Lácteos", marca="Ser", vencimiento=date(2027, 3, 5),
+        codigo_barras="7791234567890", descripcion="Entera", ubicacion="Heladera", stock_minimo=3, dias_alerta_vencimiento=9,
+    )
+    create_product(db_session, auth_user, nombre="Sal", stock=1, categoria="Almacén", marca=None, vencimiento=None)
+
+    rows = _export_csv_rows(client, sort_by="nombre")
+
+    assert rows[0] == EXPORT_COLUMNS
+    assert rows[1] == ["Leche", "4", "Lácteos", "Ser", "2027-03-05", "7791234567890", "Entera", "Heladera", "3", "9"]
+    assert rows[2] == ["Sal", "1", "Almacén", "", "", "", "", "", "", ""]
+    assert "id" not in rows[0] and "imagen_url" not in rows[0]
+
+
+def test_la_exportacion_en_excel_tiene_las_mismas_columnas(client, db_session, auth_user):
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    create_product(db_session, auth_user, nombre="Leche", stock=4, categoria="Lácteos", stock_minimo=3)
+
+    content = client.get("/me/products/export", params={"format": "xlsx"}).content
+    sheet = load_workbook(BytesIO(content)).active
+
+    assert [cell.value for cell in sheet[1]] == EXPORT_COLUMNS
+    assert sheet[2][0].value == "Leche" and sheet[2][8].value == 3
+
+
+def test_un_archivo_exportado_se_puede_volver_a_subir_y_trae_lo_mismo(client, db_session, auth_user):
+    create_product(
+        db_session, auth_user, nombre="Leche", stock=4, categoria="Lácteos", marca="Ser", vencimiento=date(2027, 3, 5),
+        codigo_barras="7791234567890", descripcion="Entera", ubicacion="Heladera", stock_minimo=3, dias_alerta_vencimiento=9,
+    )
+    texto = client.get("/me/products/export", params={"format": "csv"}).content.decode("utf-8-sig")
+
+    filas = _parse(client, texto)
+
+    assert filas[0]["valid"] is True
+    assert filas[0]["data"] | {"row_number": 2} == filas[0]["data"]
+    data = filas[0]["data"]
+    assert (data["nombre"], data["stock"], data["categoria"], data["marca"]) == ("Leche", 4, "Lácteos", "Ser")
+    assert (data["vencimiento"], data["codigo_barras"], data["descripcion"], data["ubicacion"]) == ("2027-03-05", "7791234567890", "Entera", "Heladera")
+    assert (data["stock_minimo"], data["dias_alerta_vencimiento"]) == (3, 9)
+
+
+def test_la_carga_acepta_las_columnas_en_cualquier_orden_y_sin_las_opcionales(client):
+    filas = _parse(
+        client,
+        "dias_alerta_vencimiento,ubicacion,categoria,nombre,stock,marca\n5,Heladera,Lácteos,Leche,2,Ser\n"
+        "7,,Almacén,Sal,1,\n",
+    )
+
+    assert [f["valid"] for f in filas] == [True, True]
+    leche = filas[0]["data"]
+    assert (leche["nombre"], leche["stock"], leche["categoria"], leche["marca"], leche["ubicacion"], leche["dias_alerta_vencimiento"]) == ("Leche", 2, "Lácteos", "Ser", "Heladera", 5)
+    # Lo que el archivo no trae queda vacío
+    assert (leche["vencimiento"], leche["codigo_barras"], leche["descripcion"], leche["stock_minimo"]) == (None, None, None, None)
+    assert filas[1]["data"]["marca"] is None and filas[1]["data"]["ubicacion"] is None
+
+
+def test_con_solo_las_tres_columnas_obligatorias_alcanza(client):
+    filas = _parse(client, "stock,nombre,categoria\n3,Leche,Lácteos\n")
+
+    assert filas[0]["valid"] is True
+    assert filas[0]["data"]["marca"] is None and filas[0]["data"]["dias_alerta_vencimiento"] is None
+
+
+@pytest.mark.parametrize(
+    "encabezado, faltan",
+    [
+        ("nombre,stock\nLeche,2\n", "categoria"),
+        ("stock,categoria\n2,Lácteos\n", "nombre"),
+        ("nombre,categoria,marca\nLeche,Lácteos,Ser\n", "stock"),
+        ("marca,descripcion\nSer,Entera\n", "nombre, stock, categoria"),
+    ],
+)
+def test_si_falta_una_columna_obligatoria_se_rechaza_el_archivo_diciendo_cuales(client, encabezado, faltan):
+    resp = client.post("/me/products/bulk/parse", files={"file": _csv_file(encabezado)})
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == f"Al archivo le faltan columnas obligatorias: {faltan}"
+
+
+def test_las_columnas_se_reconocen_sin_importar_mayusculas_acentos_ni_espacios(client):
+    filas = _parse(client, " Nombre ,STOCK,Categoría,Código de barras,Descripción\nLeche,2,Lácteos,7791234567890,Entera\n")
+
+    assert filas[0]["valid"] is True
+    assert filas[0]["data"]["categoria"] == "Lácteos"
+    assert filas[0]["data"]["descripcion"] == "Entera"
+
+
+def test_dias_stock_minimo_se_carga_y_stock_minimo_de_los_archivos_viejos_tambien(client):
+    nuevo = _parse(client, "nombre,stock,categoria,dias_stock_minimo\nLeche,2,Lácteos,6\n")
+    viejo = _parse(client, "nombre,stock,categoria,stock_minimo\nLeche,2,Lácteos,4\n")
+    invalido = _parse(client, "nombre,stock,categoria,dias_stock_minimo\nLeche,2,Lácteos,abc\n")
+
+    assert nuevo[0]["data"]["stock_minimo"] == 6
+    assert viejo[0]["data"]["stock_minimo"] == 4
+    assert any("dias_stock_minimo debe ser un número entero" in e for e in invalido[0]["errors"])
+
+
+def test_la_columna_imagen_url_ya_no_es_parte_del_archivo_y_se_ignora(client):
+    filas = _parse(client, "nombre,stock,categoria,imagen_url\nLeche,2,Lácteos,http://x/1.jpg\n")
+
+    assert filas[0]["valid"] is True
+    assert filas[0]["data"]["imagen_url"] is None
+
+
+def test_en_una_salida_alcanza_con_nombre_y_stock(client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="Leche", stock=5, marca=None)
+
+    filas = _parse(client, "stock,nombre\n2,Leche\n", mode="salida")
+    sin_stock = client.post("/me/products/bulk/parse", params={"mode": "salida"}, files={"file": _csv_file("nombre,marca\nLeche,Ser\n")})
+
+    assert filas[0]["valid"] is True and filas[0]["action"] == "salida"
+    assert sin_stock.status_code == 400
+    assert sin_stock.json()["detail"] == "Al archivo le faltan columnas obligatorias: stock"
+
+
+def test_un_excel_con_las_columnas_desordenadas_y_algunas_faltantes_se_lee_igual(client):
+    from io import BytesIO
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Categoría", "Stock", "Nombre", "Vencimiento"])
+    ws.append(["Lácteos", 3, "Leche", date(2027, 3, 5)])
+    buf = BytesIO()
+    wb.save(buf)
+
+    resp = client.post("/me/products/bulk/parse", files={"file": ("productos.xlsx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
+
+    fila = resp.json()["rows"][0]
+    assert resp.status_code == 200 and fila["valid"] is True
+    assert fila["data"]["nombre"] == "Leche" and fila["data"]["vencimiento"] == "2027-03-05" and fila["data"]["marca"] is None
+
+
+def test_un_excel_sin_una_columna_obligatoria_se_rechaza(client):
+    from io import BytesIO
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Nombre", "Categoría"])
+    ws.append(["Leche", "Lácteos"])
+    buf = BytesIO()
+    wb.save(buf)
+
+    resp = client.post("/me/products/bulk/parse", files={"file": ("productos.xlsx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
+
+    assert resp.status_code == 400
+    assert "stock" in resp.json()["detail"]
+
+def test_los_archivos_exportados_se_llaman_productos(client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="Leche")
+
+    csv_resp = client.get("/me/products/export", params={"format": "csv"})
+    xlsx_resp = client.get("/me/products/export", params={"format": "xlsx"})
+
+    assert csv_resp.headers["content-disposition"] == 'attachment; filename="productos.csv"'
+    assert xlsx_resp.headers["content-disposition"] == 'attachment; filename="productos.xlsx"'
