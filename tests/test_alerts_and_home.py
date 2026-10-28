@@ -245,7 +245,7 @@ def test_the_changes_show_each_movement_with_the_stock_before_and_after(client, 
     assert changes[0]["producto"]["nombre"] == "Leche"
 
 
-def test_the_changes_are_paged_and_skip_the_corrections(client, db_session, auth_user):
+def test_the_changes_are_paged_and_show_a_correction_as_a_modification(client, db_session, auth_user):
     now = datetime.now(timezone.utc)
     product = create_product(db_session, auth_user, stock=4)
     product.created_at = now - timedelta(days=9)
@@ -257,9 +257,11 @@ def test_the_changes_are_paged_and_skip_the_corrections(client, db_session, auth
     everything = client.get("/me/changes", params={"limit": 50}).json()
     first_page = client.get("/me/changes", params={"limit": 2}).json()
     second_page = client.get("/me/changes", params={"limit": 2, "offset": 2}).json()
+    third_page = client.get("/me/changes", params={"limit": 2, "offset": 4}).json()
 
-    assert [c["kind"] for c in everything] == ["entrada", "salida", "entrada"]
-    assert [c["id"] for c in first_page + second_page] == [c["id"] for c in everything]
+    # El movimiento corregido sigue apareciendo y su corrección es una «modificación»
+    assert [c["kind"] for c in everything] == ["entrada", "salida", "modificacion", "salida", "entrada"]
+    assert [c["id"] for c in first_page + second_page + third_page] == [c["id"] for c in everything]
 
 
 def test_a_product_without_creation_date_or_stock_leaves_no_initial_entry(client, db_session, auth_user):

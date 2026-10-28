@@ -111,7 +111,8 @@ Los eventos se guardan en UTC, pero **el día de cada movimiento, el «hoy» de 
 | GET | `/me/stats` | Productos, unidades en stock, productos con una alerta crítica de vencimiento y de stock, vencidos, alertas críticas y advertencias, y lo que dibujan los gráficos del dashboard: unidades por categoría, productos por ubicación y cuándo vencen (vencidos, 0 a 7, 8 a 30, 31 a 90 y más de 90 días, sin vencimiento) |
 | GET | `/me/alerts/` | Centro de alertas: filtros `tipo` (`stock` / `vencimiento`) y `level`; el resumen cuenta lo del tipo pedido, no lo del nivel |
 | GET | `/me/alerts/summary` | Cuántas alertas hay por nivel |
-| GET | `/me/changes?limit=&offset=` | «Últimos cambios»: entradas, salidas y modificaciones con el stock antes y después (se reconstruye hacia atrás desde el stock actual) |
+| PUT/DELETE | `/me/products/{id}/events/{event_id}` | Corrige o deshace un registro del **Historial del Producto**: una entrada sigue siendo entrada y una salida sigue siendo salida (si no, 400); las notas automáticas dicen «Corrige el registro del 28/10/2026 15:29» / «Deshace el registro del ...», sin número |
+| GET | `/me/changes?limit=&offset=` | «Últimos cambios»: entradas, salidas y modificaciones con el stock antes y después (se reconstruye hacia atrás desde el stock actual). Editar o deshacer un registro del historial del producto deja una sola «modificación» con el efecto neto (20 → 35 sigue ahí y se suma 35 → 33) |
 | GET | `/me/products/stock-total` | `{stock_total, products}`: unidades y cantidad de productos de la lista, con la misma búsqueda y los mismos filtros que `/me/products` (el resumen del inventario) |
 | DELETE | `/me/products/{id}` | Elimina un producto propio (con sus alertas y movimientos) |
 | POST | `/me/products/bulk-delete` | `{product_ids}` → `{deleted}`: elimina varios productos propios |
