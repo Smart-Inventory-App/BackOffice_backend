@@ -18,16 +18,19 @@ class AdminResponse(BaseModel):
     created_at: Optional[datetime] = None
     # Solo al dar de alta un admin sin cuenta: el código con el que define su contraseña.
     invite_token: Optional[str] = None
+    # Si para darlo de alta se creó su cuenta (con la contraseña inicial) o ya la tenía
+    account_created: bool = False
 
     class Config:
         from_attributes = True
 
 
 class AdminCreate(BaseModel):
-    """Alta de admin: solo email y nombre. La contraseña la define el propio
-    admin en su primer inicio de sesión (vía el servicio auth)."""
+    """Alta de admin: email, nombre y, si el email no tiene cuenta, la contraseña inicial que el administrador que da de
+    alta le hace llegar. Con ella entra por primera vez y el sistema le pide cambiarla."""
     email: EmailStr
     full_name: Optional[str] = None
+    initial_password: Optional[str] = None
 
 
 class CheckEmailRequest(BaseModel):
@@ -48,6 +51,13 @@ class MeResponse(BaseModel):
     full_name: Optional[str] = None
     is_admin: bool
     is_active: bool
+    # La cuenta tiene una contraseña inicial que le dio un administrador: antes de seguir tiene que cambiarla
+    must_change_password: bool = False
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
 
 
 class LoginRequest(BaseModel):
@@ -64,6 +74,11 @@ class SetPasswordRequest(BaseModel):
 class RegisterRequest(BaseModel):
     email: EmailStr
     password: str
+
+
+class GoogleLoginRequest(BaseModel):
+    """El idToken que Google le dio a quien tocó «Continuar con Google»: `auth` lo verifica."""
+    id_token: str
 
 
 class ForgotPasswordRequest(BaseModel):

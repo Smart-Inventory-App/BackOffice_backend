@@ -133,6 +133,32 @@ def _get_or_create_profile(user_id: str, db: Session) -> UserProfile:
 STOCK_EDIT_NOTE = "Modificación de stock"
 
 
+# Cuándo vencen los productos que todavía tienen stock: «Vencidos», los de la semana, el mes, el trimestre, más lejos y los
+# que no vencen. Es lo que dibuja el gráfico «Vencimientos» del dashboard.
+EXPIRY_BUCKETS = (
+    ("Vencidos", None, -1),
+    ("0 a 7 días", 0, 7),
+    ("8 a 30 días", 8, 30),
+    ("31 a 90 días", 31, 90),
+    ("Más de 90 días", 91, None),
+)
+
+
+def _expiry_buckets(products: list, today: date) -> list[CategoryCount]:
+    counts = {label: 0 for label, _, _ in EXPIRY_BUCKETS}
+    counts["Sin vencimiento"] = 0
+    for product in products:
+        if product.vencimiento is None:
+            counts["Sin vencimiento"] += 1
+            continue
+        days = (product.vencimiento - today).days
+        for label, low, high in EXPIRY_BUCKETS:
+            if (low is None or days >= low) and (high is None or days <= high):
+                counts[label] += 1
+                break
+    return [CategoryCount(label=label, count=count) for label, count in counts.items()]
+
+
 def _alert_filter_ids(db: Session, user_id: str, bajo_stock: bool, por_vencer: bool) -> Optional[set]:
     """Ids de los productos con una alerta de stock bajo y/o de próximo vencimiento, con las reglas vigentes (la del
     producto o, si no tiene, la del perfil) y el mismo criterio que el Centro de Alertas. `None` si no se filtra."""
@@ -191,8 +217,18 @@ def my_stats(
         .all()
     ]
 
+    stocked = own.filter(Product.stock > 0).all()
+    by_stock: dict[str, int] = {}
+    by_location: dict[str, int] = {}
+    for product in own.all():
+        by_location[product.ubicacion or "Sin ubicación"] = by_location.get(product.ubicacion or "Sin ubicación", 0) + 1
+        by_stock[product.categoria or "Sin categoría"] = by_stock.get(product.categoria or "Sin categoría", 0) + product.stock
+
     return MyStats(
         total_products=total_products,
+        stock_by_category=[CategoryCount(label=k, count=v) for k, v in sorted(by_stock.items(), key=lambda kv: -kv[1])],
+        products_by_location=[CategoryCount(label=k, count=v) for k, v in sorted(by_location.items(), key=lambda kv: -kv[1])],
+        expiry_buckets=_expiry_buckets(stocked, today),
         total_units=int(total_units or 0),
         products_with_image=products_with_image,
         low_stock_products=summary.low_stock,
@@ -681,7 +717,7 @@ def create_my_product(
         _log_consumption(db, existing.id, uid, data.stock, "restocked", actor_email=current.email)
         _log_activity(
             db, "product_updated", current.email, uid, current.email,
-            f"{current.email} sumó {data.stock} unidades a \"{existing.nombre}\" (stock: {existing.stock}) desde el backoffice",
+            f"{current.email} sumó {data.stock} unidades a \"{existing.nombre}\" (stock: {existing.stock}) desde el dashboard",
         )
         return MyProductResponse.model_validate(existing, from_attributes=True).model_copy(update={"merged": True})
 
@@ -691,7 +727,7 @@ def create_my_product(
     db.refresh(product)
     _log_activity(
         db, "product_created", current.email, uid, current.email,
-        f"{current.email} cargó \"{product.nombre}\" (stock: {product.stock}) desde el backoffice",
+        f"{current.email} cargó \"{product.nombre}\" (stock: {product.stock}) desde el dashboard",
     )
     return product
 
@@ -732,7 +768,7 @@ def bulk_edit_my_products(
     campos = ", ".join(changes.keys())
     _log_activity(
         db, "product_updated", current.email, uid, current.email,
-        f"{current.email} editó {len(products)} productos en lote ({campos}) desde el backoffice",
+        f"{current.email} editó {len(products)} productos en lote ({campos}) desde el dashboard",
     )
     return MyBulkEditResult(updated=len(products))
 
@@ -769,7 +805,7 @@ def update_my_product(
     if changed_fields:
         _log_activity(
             db, "product_updated", current.email, str(current.id), current.email,
-            f"{current.email} editó \"{product.nombre}\" ({', '.join(changed_fields)}) desde el backoffice",
+            f"{current.email} editó \"{product.nombre}\" ({', '.join(changed_fields)}) desde el dashboard",
         )
     return product
 
@@ -798,7 +834,7 @@ def register_salida(
     motivo = {"expired": "vencido", "sold": "vendido", "rented": "alquilado"}.get(data.event_type, "consumido")
     _log_activity(
         db, "product_updated", current.email, uid, current.email,
-        f"{current.email} sacó {data.quantity} unidades de \"{product.nombre}\" ({motivo}, stock: {product.stock}) desde el backoffice",
+        f"{current.email} sacó {data.quantity} unidades de \"{product.nombre}\" ({motivo}, stock: {product.stock}) desde el dashboard",
     )
     return product
 
@@ -910,7 +946,7 @@ def update_consumption_event(
     _log_activity(
         db, "product_updated", current.email, uid, current.email,
         f"{current.email} corrigió un consumo de \"{product.nombre}\" "
-        f"(de {event.quantity} a {data.quantity} unidades) desde el backoffice",
+        f"(de {event.quantity} a {data.quantity} unidades) desde el dashboard",
     )
     return {"event_type": new_event.event_type, "quantity": new_event.quantity, "remaining_stock": product.stock}
 
@@ -951,7 +987,7 @@ def delete_consumption_event(
     _log_activity(
         db, "product_updated", current.email, uid, current.email,
         f"{current.email} deshizo un registro de consumo de \"{product.nombre}\" "
-        f"({quantity} unidades, {motivo}) desde el backoffice",
+        f"({quantity} unidades, {motivo}) desde el dashboard",
     )
     return {"remaining_stock": product.stock}
 

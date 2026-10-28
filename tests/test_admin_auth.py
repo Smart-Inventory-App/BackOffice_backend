@@ -298,13 +298,8 @@ def test_list_admins_los_devuelve_mas_reciente_primero(admin_client, db_session)
     assert "viejo@x.com" in emails
 
 
-def test_create_admin_de_un_email_nuevo_delega_en_auth(admin_client, auth_service):
-    received = auth_service(
-        lambda _: httpx.Response(
-            201,
-            json={"id": 2, "email": "flamante@x.com", "full_name": "Flamante", "is_active": True, "password_set": False, "created_at": None},
-        )
-    )
+def test_create_admin_de_un_email_sin_cuenta_pide_una_contrasena_inicial(admin_client, auth_service):
+    received = auth_service(lambda _: httpx.Response(201, json={}))
 
     resp = admin_client.post(
         "/admin/auth/admins",
@@ -312,10 +307,77 @@ def test_create_admin_de_un_email_nuevo_delega_en_auth(admin_client, auth_servic
         headers={"Authorization": "Bearer faketoken"},
     )
 
+    assert resp.status_code == 404
+    assert "contraseña inicial" in resp.json()["detail"]
+    assert received == []  # sin la contraseña no se le pide nada a auth
+
+
+def test_create_admin_de_un_email_sin_cuenta_con_contrasena_inicial_crea_la_cuenta_en_auth(admin_client, auth_service):
+    import json as jsonlib
+
+    received = auth_service(
+        lambda _: httpx.Response(
+            201,
+            json={"id": 2, "email": "flamante@x.com", "full_name": "Flamante", "is_active": True, "password_set": True, "created_at": None},
+        )
+    )
+
+    resp = admin_client.post(
+        "/admin/auth/admins",
+        json={"email": "flamante@x.com", "full_name": "Flamante", "initial_password": "Inicial.2026"},
+        headers={"Authorization": "Bearer faketoken"},
+    )
+
     assert resp.status_code == 201
-    assert resp.json()["password_set"] is False
+    assert resp.json()["password_set"] is True and resp.json()["account_created"] is True
     assert received[0].url.path == "/auth/admin/admins"
     assert received[0].headers["authorization"] == "Bearer faketoken"
+    assert jsonlib.loads(received[0].content)["initial_password"] == "Inicial.2026"
+
+
+def test_una_contrasena_inicial_que_auth_rechaza_se_explica(admin_client, auth_service):
+    auth_service(lambda _: httpx.Response(400, json={"detail": "auth.password_missing_uppercase"}))
+
+    resp = admin_client.post(
+        "/admin/auth/admins",
+        json={"email": "flamante@x.com", "initial_password": "inicial.2026"},
+        headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert resp.status_code == 400 and resp.json()["detail"] == "La contraseña debe incluir al menos una mayúscula."
+
+
+def test_una_respuesta_400_de_auth_sin_cuerpo_usa_el_mensaje_generico(admin_client, auth_service):
+    auth_service(lambda _: httpx.Response(400, text="mal"))
+
+    resp = admin_client.post(
+        "/admin/auth/admins",
+        json={"email": "flamante@x.com", "initial_password": "Inicial.2026"},
+        headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert resp.json()["detail"] == "La contraseña inicial no es válida."
+
+
+def test_create_admin_de_un_usuario_con_cuenta_no_manda_la_contrasena_inicial(admin_client, db_session, auth_service):
+    import json as jsonlib
+
+    db_session.add(AuthUser(email="conta@x.com", hashed_password="x", is_active=True))
+    db_session.commit()
+    received = auth_service(
+        lambda _: httpx.Response(
+            201, json={"id": 5, "email": "conta@x.com", "full_name": None, "is_active": True, "password_set": True, "created_at": None}
+        )
+    )
+
+    resp = admin_client.post(
+        "/admin/auth/admins",
+        json={"email": "conta@x.com", "initial_password": "Inicial.2026"},
+        headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert resp.status_code == 201 and resp.json()["account_created"] is False
+    assert "initial_password" not in jsonlib.loads(received[0].content)
 
 
 def test_create_admin_ya_existente_localmente_es_conflicto_sin_llamar_a_auth(admin_client, db_session, auth_service):
@@ -337,7 +399,7 @@ def test_create_admin_rechazado_por_auth_es_conflicto(admin_client, auth_service
 
     resp = admin_client.post(
         "/admin/auth/admins",
-        json={"email": "repe@x.com"},
+        json={"email": "repe@x.com", "initial_password": "Inicial.2026"},
         headers={"Authorization": "Bearer faketoken"},
     )
 
@@ -392,7 +454,7 @@ def test_create_admin_con_un_error_inesperado_de_auth_lo_reenvia_sin_crear_nada(
 
     resp = admin_client.post(
         "/admin/auth/admins",
-        json={"email": "nuevo@x.com"},
+        json={"email": "nuevo@x.com", "initial_password": "Inicial.2026"},
         headers={"Authorization": "Bearer faketoken"},
     )
 
@@ -406,7 +468,11 @@ def test_create_admin_reenvia_el_bearer_del_caller_a_auth(admin_client, auth_ser
         "id": 1, "email": "nuevo@x.com", "full_name": None, "is_active": True, "password_set": False, "created_at": None,
     }))
 
-    admin_client.post("/admin/auth/admins", json={"email": "nuevo@x.com"}, headers={"Authorization": "Bearer token-del-caller"})
+    admin_client.post(
+        "/admin/auth/admins",
+        json={"email": "nuevo@x.com", "initial_password": "Inicial.2026"},
+        headers={"Authorization": "Bearer token-del-caller"},
+    )
 
     assert received[0].headers["authorization"] == "Bearer token-del-caller"
     assert received[0].url.path == "/auth/admin/admins"
@@ -475,7 +541,9 @@ def test_create_admin_devuelve_el_codigo_de_invitacion_que_entrego_auth(admin_cl
     }))
 
     resp = admin_client.post(
-        "/admin/auth/admins", json={"email": "nuevo@x.com"}, headers={"Authorization": "Bearer faketoken"},
+        "/admin/auth/admins",
+        json={"email": "nuevo@x.com", "initial_password": "Inicial.2026"},
+        headers={"Authorization": "Bearer faketoken"},
     )
 
     assert resp.status_code == 201
@@ -583,3 +651,168 @@ def test_un_error_sin_cuerpo_json_usa_el_mensaje_por_defecto(db_client, auth_ser
     resp = db_client.post("/admin/auth/reset-password", json={"reset_token": "abc", "new_password": "Nueva1234"})
 
     assert resp.status_code == 502 and resp.json()["detail"] == "No se pudo cambiar la contraseña."
+
+
+# ── cambiar la contraseña (contraseña inicial de un administrador) ────────────
+
+@pytest.fixture()
+def user_client(db_session, auth_user):
+    from app.core.database import get_db
+    from app.core.security import get_current_user
+    from app.main import app
+
+    def override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user] = lambda: auth_user
+    with TestClient(app) as c:
+        yield c
+    app.dependency_overrides.clear()
+
+
+def test_me_avisa_que_la_cuenta_tiene_que_cambiar_la_contrasena(user_client, db_session, auth_user):
+    assert user_client.get("/admin/auth/me").json()["must_change_password"] is False
+
+    auth_user.must_change_password = True
+    db_session.commit()
+
+    assert user_client.get("/admin/auth/me").json()["must_change_password"] is True
+
+
+def test_cambiar_la_contrasena_se_la_pide_a_auth_con_el_mismo_token(user_client, auth_service):
+    import json as jsonlib
+
+    received = auth_service(lambda _: httpx.Response(204))
+
+    resp = user_client.post(
+        "/admin/auth/change-password",
+        json={"current_password": "Inicial.2026", "new_password": "Definitiva.99"},
+        headers={"Authorization": "Bearer tok-usuario"},
+    )
+
+    assert resp.status_code == 204
+    assert received[0].url.path == "/auth/change-password"
+    assert received[0].headers["authorization"] == "Bearer tok-usuario"
+    assert jsonlib.loads(received[0].content) == {"current_password": "Inicial.2026", "new_password": "Definitiva.99"}
+
+
+@pytest.mark.parametrize(
+    "detail, message",
+    [
+        ("auth.invalid_credentials", "La contraseña actual no es correcta."),
+        ("auth.password_same_as_current", "La contraseña nueva no puede ser igual a la actual."),
+        ("auth.password_too_short", "La contraseña debe tener al menos 8 caracteres."),
+        ("auth.algo_raro", "No se pudo cambiar la contraseña."),
+    ],
+)
+def test_un_cambio_rechazado_se_explica_en_castellano(user_client, auth_service, detail, message):
+    auth_service(lambda _: httpx.Response(400, json={"detail": detail}))
+
+    resp = user_client.post(
+        "/admin/auth/change-password",
+        json={"current_password": "x", "new_password": "y"},
+        headers={"Authorization": "Bearer tok"},
+    )
+
+    assert resp.status_code == 400 and resp.json()["detail"] == message
+
+
+def test_un_cambio_rechazado_sin_cuerpo_json_usa_el_mensaje_generico(user_client, auth_service):
+    auth_service(lambda _: httpx.Response(500, text="boom"))
+
+    resp = user_client.post(
+        "/admin/auth/change-password",
+        json={"current_password": "x", "new_password": "y"},
+        headers={"Authorization": "Bearer tok"},
+    )
+
+    assert resp.status_code == 500 and resp.json()["detail"] == "No se pudo cambiar la contraseña."
+
+
+# ── ingreso y registro con Google (delega en `auth`) ──────────────────────────
+
+def google_token(email, secret=None):
+    from datetime import datetime, timedelta
+
+    from jose import jwt
+
+    from app.core.config import settings
+
+    return jwt.encode(
+        {"sub": "u", "email": email, "exp": datetime.utcnow() + timedelta(minutes=5)},
+        secret or settings.JWT_SECRET,
+        algorithm=settings.JWT_ALGORITHM,
+    )
+
+
+def test_google_entra_con_el_token_que_devuelve_auth_y_lo_deja_en_la_actividad(db_client, db_session, auth_service):
+    import json as jsonlib
+
+    token = google_token("ana@x.com")
+    received = auth_service(lambda _: httpx.Response(200, json={"access_token": token, "token_type": "bearer"}))
+
+    resp = db_client.post("/admin/auth/google", json={"id_token": "id-token-de-google"})
+
+    assert resp.status_code == 200 and resp.json()["access_token"] == token
+    assert received[0].url.path == "/auth/google"
+    assert jsonlib.loads(received[0].content) == {"id_token": "id-token-de-google"}
+    log = db_session.query(AdminActivityLog).filter(AdminActivityLog.event_type == "login").one()
+    assert log.actor_email == "ana@x.com" and "con Google en el dashboard" in log.description
+    assert "(administrador)" not in log.description
+
+
+def test_google_de_un_administrador_lo_marca_en_la_actividad(db_client, db_session, auth_service):
+    create_admin(db_session, email="jefe@x.com", password_set=True)
+    db_session.add(AuthUser(email="jefe@x.com", hashed_password="x", is_active=True))
+    db_session.commit()
+    auth_service(lambda _: httpx.Response(200, json={"access_token": google_token("jefe@x.com")}))
+
+    assert db_client.post("/admin/auth/google", json={"id_token": "t"}).status_code == 200
+
+    log = db_session.query(AdminActivityLog).filter(AdminActivityLog.event_type == "login").one()
+    assert "(administrador)" in log.description and log.target_user_id is not None
+
+
+def test_google_no_deja_entrar_a_un_administrador_dado_de_baja(db_client, db_session, auth_service):
+    create_admin(db_session, email="baja@x.com", is_active=False)
+    auth_service(lambda _: httpx.Response(200, json={"access_token": google_token("baja@x.com")}))
+
+    resp = db_client.post("/admin/auth/google", json={"id_token": "t"})
+
+    assert resp.status_code == 403 and resp.json()["detail"] == "Cuenta deshabilitada"
+
+
+@pytest.mark.parametrize(
+    "status_code, detail, message",
+    [
+        (401, "auth.google_invalid_token", "Token de Google inválido"),
+        (401, "auth.google_email_not_verified", "El email de Google no está verificado"),
+        (503, "auth.google_unreachable", "No se pudo contactar a Google"),
+        (503, "auth.google_not_configured", "El inicio de sesión con Google no está disponible por el momento"),
+        (403, "auth.account_disabled", "La cuenta está desactivada"),
+        (500, "auth.algo_raro", "Error al iniciar sesión con Google"),
+    ],
+)
+def test_google_explica_cada_error_con_los_mensajes_de_la_app(db_client, auth_service, status_code, detail, message):
+    auth_service(lambda _: httpx.Response(status_code, json={"detail": detail}))
+
+    resp = db_client.post("/admin/auth/google", json={"id_token": "t"})
+
+    assert resp.status_code == status_code and resp.json()["detail"] == message
+
+
+def test_google_con_un_error_de_auth_sin_cuerpo_json_usa_el_mensaje_generico(db_client, auth_service):
+    auth_service(lambda _: httpx.Response(502, text="bad gateway"))
+
+    resp = db_client.post("/admin/auth/google", json={"id_token": "t"})
+
+    assert resp.status_code == 502 and resp.json()["detail"] == "Error al iniciar sesión con Google"
+
+
+def test_google_con_un_token_que_no_es_nuestro_se_rechaza(db_client, auth_service):
+    auth_service(lambda _: httpx.Response(200, json={"access_token": "esto-no-es-un-jwt"}))
+
+    resp = db_client.post("/admin/auth/google", json={"id_token": "t"})
+
+    assert resp.status_code == 502

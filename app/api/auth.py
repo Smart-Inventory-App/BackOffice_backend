@@ -1,4 +1,5 @@
 import httpx
+from jose import JWTError, jwt
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -11,9 +12,11 @@ from app.models.audit import AdminActivityLog, AdminRoleAudit
 from app.schemas.admin import (
     AdminCreate,
     AdminResponse,
+    ChangePasswordRequest,
     CheckEmailRequest,
     CheckEmailResponse,
     ForgotPasswordRequest,
+    GoogleLoginRequest,
     LoginRequest,
     MeResponse,
     RegisterRequest,
@@ -188,7 +191,7 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
                 actor_email=body.email,
                 target_user_id=str(auth_user.id) if auth_user else None,
                 target_email=body.email,
-                description=f"{body.email} inició sesión en el backoffice"
+                description=f"{body.email} inició sesión en el dashboard"
                 + (" (administrador)" if admin else ""),
             )
         )
@@ -201,6 +204,53 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     raise HTTPException(status_code=r.status_code, detail="No se pudo iniciar sesión")
 
 
+# Los mismos mensajes que muestra la app del celular cuando falla el ingreso con Google
+_GOOGLE_ERROR_MESSAGES = {
+    "google_not_configured": "El inicio de sesión con Google no está disponible por el momento",
+    "google_unreachable": "No se pudo contactar a Google",
+    "google_invalid_token": "Token de Google inválido",
+    "google_email_not_verified": "El email de Google no está verificado",
+    "account_disabled": "La cuenta está desactivada",
+}
+
+
+@router.post("/google", response_model=TokenResponse)
+def google_login(body: GoogleLoginRequest, db: Session = Depends(get_db)):
+    """Ingreso y registro con Google, igual que en la app: `auth` verifica el idToken (que lo haya emitido Google para
+    nuestro cliente Web), crea la cuenta si es la primera vez y devuelve el token de siempre. Quien tiene una cuenta
+    deshabilitada o es un administrador dado de baja no entra."""
+    r = _auth_post("/auth/google", {"id_token": body.id_token})
+    if r.status_code != 200:
+        detail = r.json().get("detail") if r.headers.get("content-type", "").startswith("application/json") else None
+        code = detail.removeprefix("auth.") if isinstance(detail, str) else None
+        raise HTTPException(
+            status_code=r.status_code,
+            detail=_GOOGLE_ERROR_MESSAGES.get(code, "Error al iniciar sesión con Google"),
+        )
+
+    access_token = r.json()["access_token"]
+    try:
+        email = jwt.decode(access_token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM]).get("email")
+    except JWTError:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Error al iniciar sesión con Google")
+    admin = _get_admin_row(email, db)
+    if admin and not admin.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cuenta deshabilitada")
+
+    auth_user = db.query(AuthUser).filter(AuthUser.email == email).first()
+    db.add(
+        AdminActivityLog(
+            event_type="login",
+            actor_email=email,
+            target_user_id=str(auth_user.id) if auth_user else None,
+            target_email=email,
+            description=f"{email} inició sesión con Google en el dashboard" + (" (administrador)" if admin else ""),
+        )
+    )
+    db.commit()
+    return TokenResponse(access_token=access_token)
+
+
 @router.get("/me", response_model=MeResponse)
 def me(db: Session = Depends(get_db), current: AuthUser = Depends(get_current_user)):
     admin = _get_admin_row(current.email, db)
@@ -211,7 +261,33 @@ def me(db: Session = Depends(get_db), current: AuthUser = Depends(get_current_us
         full_name=admin.full_name if admin else None,
         is_admin=is_admin,
         is_active=bool(current.is_active),
+        must_change_password=bool(current.must_change_password),
     )
+
+
+@router.post("/change-password", status_code=status.HTTP_204_NO_CONTENT)
+def change_password(
+    body: ChangePasswordRequest,
+    authorization: str = Header(...),
+    _: AuthUser = Depends(get_current_user),
+):
+    """Cambia la contraseña de quien tiene la sesión iniciada: lo hace `auth` con el mismo token. Es lo que cierra el
+    «tenés que cambiarla» de un administrador que ingresó con la contraseña inicial que le dieron."""
+    r = _auth_request(
+        "POST",
+        "/auth/change-password",
+        json={"current_password": body.current_password, "new_password": body.new_password},
+        headers={"Authorization": authorization},
+    )
+    if r.status_code == 204:
+        return
+    detail = r.json().get("detail") if r.headers.get("content-type", "").startswith("application/json") else None
+    messages = {
+        **_REGISTER_ERROR_MESSAGES,
+        "auth.invalid_credentials": "La contraseña actual no es correcta.",
+        "auth.password_same_as_current": "La contraseña nueva no puede ser igual a la actual.",
+    }
+    raise HTTPException(status_code=r.status_code, detail=messages.get(detail, "No se pudo cambiar la contraseña."))
 
 
 @router.get("/admins", response_model=list[AdminResponse])
@@ -239,26 +315,38 @@ def create_admin(
             detail="Ya existe un administrador con ese email",
         )
 
-    r = _auth_request(
-        "POST",
-        "/auth/admin/admins",
-        json={"email": data.email, "full_name": data.full_name},
-        headers={"Authorization": authorization},
-    )
+    existing_user = db.query(AuthUser).filter(AuthUser.email == data.email).first()
+    if not existing_user and not data.initial_password:
+        # Sin cuenta hace falta una contraseña inicial para pasársela a quien va a ser administrador: el panel la pide.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Ese email todavía no tiene cuenta: definí una contraseña inicial para pasársela.",
+        )
+
+    payload = {"email": data.email, "full_name": data.full_name}
+    if not existing_user:
+        payload["initial_password"] = data.initial_password
+    r = _auth_request("POST", "/auth/admin/admins", json=payload, headers={"Authorization": authorization})
     if r.status_code == 409:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ya existe un administrador con ese email")
+    if r.status_code == 400:
+        detail = r.json().get("detail") if r.headers.get("content-type", "").startswith("application/json") else None
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_REGISTER_ERROR_MESSAGES.get(detail, "La contraseña inicial no es válida."),
+        )
     if r.status_code != 201:
         raise HTTPException(status_code=r.status_code, detail="No se pudo crear el administrador")
 
-    existing_user = db.query(AuthUser).filter(AuthUser.email == data.email).first()
-    if existing_user:
+    account = existing_user or db.query(AuthUser).filter(AuthUser.email == data.email).first()
+    if account:
         db.add(
             AdminRoleAudit(
-                user_id=str(existing_user.id),
+                user_id=str(account.id),
                 changed_by=current_admin.email,
                 action="granted",
             )
         )
         db.commit()
 
-    return r.json()
+    return {**r.json(), "account_created": existing_user is None}

@@ -151,3 +151,23 @@ def test_the_user_sees_the_total_stock_of_the_same_product_among_their_own_lots(
 def test_a_group_that_does_not_exist_is_a_404_and_a_blank_search_finds_nothing(client):
     assert client.get("/me/products/group", params={"nombre": "Nada", "categoria": "X"}).status_code == 404
     assert client.get("/me/products/groups", params={"q": "  "}).json() == []
+
+
+def test_the_stats_bring_what_the_dashboard_charts_need(client, db_session, auth_user):
+    today = ar_today()
+    create_product(db_session, auth_user, nombre="Vencida", categoria="Lácteos", stock=2, vencimiento=today - timedelta(days=1), ubicacion="Heladera")
+    create_product(db_session, auth_user, nombre="Esta semana", categoria="Lácteos", stock=3, vencimiento=today + timedelta(days=3), ubicacion="Heladera")
+    create_product(db_session, auth_user, nombre="Este mes", categoria="Almacén", stock=4, vencimiento=today + timedelta(days=20), ubicacion=None)
+    create_product(db_session, auth_user, nombre="Trimestre", categoria="Almacén", stock=5, vencimiento=today + timedelta(days=60))
+    create_product(db_session, auth_user, nombre="Lejos", categoria="Almacén", stock=6, vencimiento=today + timedelta(days=400))
+    create_product(db_session, auth_user, nombre="No vence", categoria="Limpieza", stock=7, vencimiento=None)
+    create_product(db_session, auth_user, nombre="Sin stock", categoria="Limpieza", stock=0, vencimiento=today + timedelta(days=2))
+
+    stats = client.get("/me/stats").json()
+
+    assert {b["label"]: b["count"] for b in stats["expiry_buckets"]} == {
+        "Vencidos": 1, "0 a 7 días": 1, "8 a 30 días": 1, "31 a 90 días": 1, "Más de 90 días": 1, "Sin vencimiento": 1,
+    }
+    assert [(c["label"], c["count"]) for c in stats["stock_by_category"]] == [("Almacén", 15), ("Limpieza", 7), ("Lácteos", 5)]
+    locations = {c["label"]: c["count"] for c in stats["products_by_location"]}
+    assert locations["Heladera"] == 2 and locations["Sin ubicación"] == 5

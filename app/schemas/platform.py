@@ -148,6 +148,10 @@ class MyStats(BaseModel):
     critical_alerts: int = 0
     warning_alerts: int = 0
     products_by_category: List[CategoryCount]
+    # Unidades en stock por categoría, productos por ubicación y cuándo vencen: los gráficos del dashboard
+    stock_by_category: List[CategoryCount] = []
+    products_by_location: List[CategoryCount] = []
+    expiry_buckets: List[CategoryCount] = []
 
 
 class MyProductResponse(BaseModel):

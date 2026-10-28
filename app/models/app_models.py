@@ -23,6 +23,8 @@ class AuthUser(Base):
     is_active = Column(Boolean, default=True)
     # False en las cuentas creadas con Google que todavía no definieron una contraseña
     has_password = Column(Boolean, default=True, nullable=False, server_default="true")
+    # True en una cuenta que un administrador creó con una contraseña inicial: en su primer ingreso tiene que cambiarla
+    must_change_password = Column(Boolean, default=False, nullable=False, server_default="false")
     created_at = Column(DateTime)
 
 

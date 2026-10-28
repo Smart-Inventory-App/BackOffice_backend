@@ -206,7 +206,7 @@ def salida_por_comprobante(
         _log_activity(
             db, "product_updated", current.email, uid, current.email,
             f'{current.email} sacó {item.quantity} unidades de "{product.nombre}" '
-            f"({MOTIVO_COMPROBANTE}, stock: {product.stock}) desde el backoffice",
+            f"({MOTIVO_COMPROBANTE}, stock: {product.stock}) desde el dashboard",
         )
         procesados += 1
 

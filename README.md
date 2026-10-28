@@ -44,11 +44,15 @@ Puerto: **8002**.
 | POST | `/admin/auth/login` | Login de admin → `access_token` |
 | GET | `/admin/auth/me` | Admin autenticado |
 | GET | `/admin/auth/admins` | Listar administradores |
-| POST | `/admin/auth/admins` | Crear un nuevo administrador |
+| POST | `/admin/auth/admins` | Agregar un administrador por su email. Con cuenta: la conserva. **Sin cuenta: `404` hasta que se manda `initial_password`**, con la que `auth` crea la cuenta; la persona la cambia en su primer ingreso (`must_change_password`). La respuesta trae `account_created` |
+| POST | `/admin/auth/change-password` | Cambia la contraseña de quien tiene la sesión iniciada (lo hace `auth` con el mismo token) |
 
+| POST | `/admin/auth/google` | **Ingreso y registro con Google**, igual que en la app: recibe el `id_token` que le dio Google a quien tocó «Continuar con Google» y se lo pasa a `auth` (`POST /auth/google`), que lo verifica, comprueba que lo emitió Google para nuestro cliente Web y crea la cuenta si es la primera vez. Devuelve el token de siempre. Un administrador dado de baja no entra; los errores salen con los mismos textos que en la app (token inválido, email sin verificar, Google inalcanzable, cuenta desactivada) |
 | POST | `/admin/auth/forgot-password` | Pide a `auth` un código por mail para recuperar (o crear, en una cuenta de Google) la contraseña |
 | POST | `/admin/auth/verify-code` | Verifica el código y devuelve el permiso para cambiar la contraseña |
 | POST | `/admin/auth/reset-password` | Guarda la contraseña nueva |
+
+`GET /admin/auth/me` devuelve `must_change_password`: el dashboard no deja usar nada hasta que se cambie la contraseña inicial.
 
 `POST /admin/auth/check` además devuelve `google_only`: la cuenta se creó con Google y todavía no tiene contraseña (el ingreso ofrece crear una desde «Olvidé mi contraseña»).
 
@@ -104,7 +108,7 @@ Los eventos se guardan en UTC, pero **el día de cada movimiento, el «hoy» de 
 
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
-| GET | `/me/stats` | Productos, unidades en stock, productos con una alerta crítica de vencimiento y de stock, vencidos, alertas críticas y advertencias |
+| GET | `/me/stats` | Productos, unidades en stock, productos con una alerta crítica de vencimiento y de stock, vencidos, alertas críticas y advertencias, y lo que dibujan los gráficos del dashboard: unidades por categoría, productos por ubicación y cuándo vencen (vencidos, 0 a 7, 8 a 30, 31 a 90 y más de 90 días, sin vencimiento) |
 | GET | `/me/alerts/` | Centro de alertas: filtros `tipo` (`stock` / `vencimiento`) y `level`; el resumen cuenta lo del tipo pedido, no lo del nivel |
 | GET | `/me/alerts/summary` | Cuántas alertas hay por nivel |
 | GET | `/me/changes?limit=&offset=` | «Últimos cambios»: entradas, salidas y modificaciones con el stock antes y después (se reconstruye hacia atrás desde el stock actual) |
