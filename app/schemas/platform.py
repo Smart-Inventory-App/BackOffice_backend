@@ -382,6 +382,10 @@ class MyMetrics(BaseModel):
     total_entradas: int
     consumo_por_dia: List[ConsumoPorDia]
     top_productos: List[ProductoConsumo]
+    # Todo lo que ingresó al stock en el período: las reposiciones de productos que ya existían y el stock con el que se
+    # cargaron los productos nuevos. Por día (días argentinos) y en total.
+    total_ingresos: int = 0
+    ingresos_por_dia: List[ConsumoPorDia] = []
 
 
 class ActivityEntry(BaseModel):

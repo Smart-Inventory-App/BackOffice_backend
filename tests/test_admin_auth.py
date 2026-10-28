@@ -269,7 +269,8 @@ def test_me_devuelve_si_el_usuario_es_admin(db_session):
         app.dependency_overrides.clear()
 
     assert data["is_admin"] is True
-    assert data["full_name"] == "Ana Admin"
+    # el nombre de la sesión es el del perfil, no el que se cargó al dar de alta al administrador
+    assert data["full_name"] is None
 
 
 # ── admins (listado local; alta delega en `auth`) ──────────────────────────────
@@ -816,3 +817,59 @@ def test_google_con_un_token_que_no_es_nuestro_se_rechaza(db_client, auth_servic
     resp = db_client.post("/admin/auth/google", json={"id_token": "t"})
 
     assert resp.status_code == 502
+
+
+# ── el nombre de la sesión: solo el nombre y el apellido del perfil, igual para administradores y usuarios ──
+
+def _me(db_session, email):
+    from app.core.database import get_db
+    from app.core.security import get_current_user
+    from app.main import app
+
+    user = db_session.query(AuthUser).filter(AuthUser.email == email).one()
+
+    def override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user] = lambda: user
+    try:
+        with TestClient(app) as c:
+            return c.get("/admin/auth/me").json()
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize("first, last, expected", [("Ana", "Gómez", "Ana Gómez"), ("Ana", None, "Ana"), (None, "Gómez", "Gómez"), (None, None, None)])
+def test_la_sesion_muestra_el_nombre_y_el_apellido_del_perfil_si_existen(db_session, first, last, expected):
+    from app.models.app_models import UserProfile
+
+    user = AuthUser(email="ana@x.com", hashed_password="x", is_active=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.add(UserProfile(user_id=str(user.id), first_name=first, last_name=last))
+    db_session.commit()
+
+    assert _me(db_session, "ana@x.com")["full_name"] == expected
+
+
+def test_un_administrador_muestra_lo_mismo_que_un_usuario_y_no_el_nombre_del_alta(db_session):
+    from app.models.app_models import UserProfile
+
+    create_admin(db_session, email="jefe@x.com", full_name="Nombre del alta")
+    user = AuthUser(email="jefe@x.com", hashed_password="x", is_active=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.add(UserProfile(user_id=str(user.id), first_name="Jefa", last_name="Suprema"))
+    db_session.commit()
+
+    me = _me(db_session, "jefe@x.com")
+
+    assert me["is_admin"] is True and me["full_name"] == "Jefa Suprema"
+
+
+def test_una_cuenta_sin_perfil_no_muestra_nombre(db_session):
+    db_session.add(AuthUser(email="sinperfil@x.com", hashed_password="x", is_active=True))
+    db_session.commit()
+
+    assert _me(db_session, "sinperfil@x.com")["full_name"] is None

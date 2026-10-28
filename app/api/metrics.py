@@ -18,6 +18,41 @@ router = APIRouter(tags=["metrics"])
 TOP_PRODUCTS = 5
 
 
+def _ingresos(db: Session, since_start: datetime, user_id: Optional[str]) -> list[tuple[datetime, int]]:
+    """Cada carga de stock desde `since_start` (UTC sin zona): las reposiciones de productos que ya existían y el stock con
+    el que se cargó cada producto nuevo.
+
+    El stock inicial de un producto no queda como un movimiento: se reconstruye hacia atrás desde el stock actual,
+    deshaciendo todos sus movimientos (así se muestra también en «Últimos cambios»). Las correcciones del historial no
+    cuentan: queda el movimiento corregido.
+    """
+    reversed_ids = {row[0] for row in db.query(ConsumptionEvent.reverses_event_id).filter(ConsumptionEvent.reverses_event_id.isnot(None)).all()}
+    restocked = db.query(ConsumptionEvent).filter(
+        ConsumptionEvent.event_type == "restocked",
+        ConsumptionEvent.consumed_at >= since_start,
+        ConsumptionEvent.reverses_event_id.is_(None),
+    )
+    if user_id is not None:
+        restocked = restocked.filter(ConsumptionEvent.user_id == user_id)
+    entries = [(e.consumed_at, e.quantity) for e in restocked.all() if e.id not in reversed_ids]
+
+    created = db.query(Product).filter(Product.created_at.isnot(None))
+    if user_id is not None:
+        created = created.filter(Product.user_id == user_id)
+    for product in created.all():
+        created_at = product.created_at if product.created_at.tzinfo is None else product.created_at.astimezone(timezone.utc).replace(tzinfo=None)
+        if created_at < since_start:
+            continue
+        effect = sum(
+            e.quantity if e.event_type == "restocked" else -e.quantity
+            for e in db.query(ConsumptionEvent).filter(ConsumptionEvent.product_id == product.id).all()
+        )
+        initial = product.stock - effect
+        if initial > 0:
+            entries.append((product.created_at, initial))
+    return entries
+
+
 def build_metrics(db: Session, period: int, user_id: Optional[str] = None) -> MyMetrics:
     """Consumo de los últimos `period` días (contando hoy), con los días y el «hoy» de Argentina.
 
@@ -27,6 +62,7 @@ def build_metrics(db: Session, period: int, user_id: Optional[str] = None) -> My
     today = ar_today()
     since = today - timedelta(days=period - 1)
     since_start = datetime.combine(since, time.min, tzinfo=AR_TZ).astimezone(timezone.utc).replace(tzinfo=None)
+    ingresos = _ingresos(db, since_start, user_id)
 
     reversed_ids = db.query(ConsumptionEvent.reverses_event_id).filter(
         ConsumptionEvent.reverses_event_id.isnot(None)
@@ -64,6 +100,15 @@ def build_metrics(db: Session, period: int, user_id: Optional[str] = None) -> My
             for p in db.query(Product.id, Product.nombre).filter(Product.id.in_(list(per_product))).all()
         }
 
+    per_day_in: dict[str, int] = {}
+    for moment, quantity in ingresos:
+        day = ar_day(moment).isoformat()
+        per_day_in[day] = per_day_in.get(day, 0) + quantity
+    ingresos_por_dia = []
+    for i in range(period - 1, -1, -1):
+        d = (today - timedelta(days=i)).isoformat()
+        ingresos_por_dia.append(ConsumoPorDia(day=d, quantity=per_day_in.get(d, 0)))
+
     grouped: dict[str, dict] = {}
     for pid, qty in per_product.items():
         name = names.get(pid, f"Producto #{pid}")
@@ -83,6 +128,8 @@ def build_metrics(db: Session, period: int, user_id: Optional[str] = None) -> My
         total_entradas=total_entradas,
         consumo_por_dia=consumo_por_dia,
         top_productos=ranked[:TOP_PRODUCTS],
+        total_ingresos=sum(per_day_in.values()),
+        ingresos_por_dia=ingresos_por_dia,
     )
 
 

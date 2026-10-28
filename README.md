@@ -52,7 +52,7 @@ Puerto: **8002**.
 | POST | `/admin/auth/verify-code` | Verifica el código y devuelve el permiso para cambiar la contraseña |
 | POST | `/admin/auth/reset-password` | Guarda la contraseña nueva |
 
-`GET /admin/auth/me` devuelve `must_change_password`: el dashboard no deja usar nada hasta que se cambie la contraseña inicial.
+`GET /admin/auth/me` devuelve `must_change_password`: el dashboard no deja usar nada hasta que se cambie la contraseña inicial. Su `full_name` es solo el **nombre y apellido del perfil** de la cuenta (igual para administradores y usuarios; `null` si no hay ninguno), no el nombre con el que se dio de alta al administrador.
 
 `POST /admin/auth/check` además devuelve `google_only`: la cuenta se creó con Google y todavía no tiene contraseña (el ingreso ofrece crear una desde «Olvidé mi contraseña»).
 
@@ -61,7 +61,7 @@ Puerto: **8002**.
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
 | GET | `/admin/stats/` | Usuarios, productos y unidades, alertas críticas y advertencias de toda la plataforma (con las reglas de cada usuario), usuarios con alertas, consumo y reposición de los últimos 7 días, categorías |
-| GET | `/admin/metrics?period=` | Tendencias de consumo de toda la plataforma (mismo formato que `/me/metrics`) |
+| GET | `/admin/metrics?period=` | Tendencias de consumo e ingresos de toda la plataforma (mismo formato que `/me/metrics`) |
 
 ### Usuarios
 
@@ -112,7 +112,7 @@ Los eventos se guardan en UTC, pero **el día de cada movimiento, el «hoy» de 
 | GET | `/me/alerts/` | Centro de alertas: filtros `tipo` (`stock` / `vencimiento`) y `level`; el resumen cuenta lo del tipo pedido, no lo del nivel |
 | GET | `/me/alerts/summary` | Cuántas alertas hay por nivel |
 | GET | `/me/changes?limit=&offset=` | «Últimos cambios»: entradas, salidas y modificaciones con el stock antes y después (se reconstruye hacia atrás desde el stock actual) |
-| GET | `/me/metrics?period=` | Tendencias: consumo por día (días argentinos), totales y los **5** productos más consumidos (los lotes de un mismo nombre cuentan como uno); sin «menos usados» |
+| GET | `/me/metrics?period=` | Tendencias: consumo por día (días argentinos), totales y los **5** productos más consumidos (los lotes de un mismo nombre cuentan como uno); sin «menos usados». Además **ingresos por día** (`ingresos_por_dia`, `total_ingresos`): reposiciones sin corregir más el stock con el que se cargaron los productos creados en el período |
 | GET | `/me/profile`, PUT | Perfil con los límites de la app: nombre, apellido y usuario hasta 20 caracteres, días de las alertas de 2 a 90, hora del chequeo de 0 a 23 (Argentina), tipo de cuenta |
 | GET | `/me/profile/username-available?username=` | Si el nombre de usuario se puede usar; guardarlo repetido es un `409` (no distingue mayúsculas) |
 | POST | `/me/products/image` | Sube la **imagen de un producto como archivo** (`multipart`, JPG/PNG/WebP de hasta `MAX_IMAGE_MB`) al servicio de almacenamiento con el token del usuario y devuelve `{ "url": ... }` |

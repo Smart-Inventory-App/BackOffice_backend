@@ -171,3 +171,56 @@ def test_the_stats_bring_what_the_dashboard_charts_need(client, db_session, auth
     assert [(c["label"], c["count"]) for c in stats["stock_by_category"]] == [("Almacén", 15), ("Limpieza", 7), ("Lácteos", 5)]
     locations = {c["label"]: c["count"] for c in stats["products_by_location"]}
     assert locations["Heladera"] == 2 and locations["Sin ubicación"] == 5
+
+
+# ── ingresos por día: reposiciones + el stock con el que se cargan los productos nuevos ──
+
+def test_the_incomes_count_restocks_and_the_initial_stock_of_new_products_by_argentine_day(client, db_session, auth_user):
+    today = ar_today()
+    existing = create_product(db_session, auth_user, nombre="Leche", stock=12)   # 5 con los que se cargó + 7 repuestos
+    add_event(db_session, existing, 7, "restocked", days_ago=0)
+    create_product(db_session, auth_user, nombre="Pan", stock=4)                  # se cargó hoy con 4
+    add_event(db_session, existing, 3, "consumed", days_ago=0)                    # una salida no es un ingreso
+
+    body = client.get("/me/metrics", params={"period": 7}).json()
+
+    assert body["total_ingresos"] == 7 + 4 + 8 and len(body["ingresos_por_dia"]) == 7
+    assert body["ingresos_por_dia"][-1] == {"day": today.isoformat(), "quantity": 7 + 4 + 8}
+    assert body["total_entradas"] == 7  # «repuesto» sigue contando solo las reposiciones
+
+
+def test_the_incomes_leave_out_corrections_and_old_products(client, db_session, auth_user):
+    from datetime import timezone
+
+    product = create_product(db_session, auth_user, nombre="Viejo", stock=9)
+    product.created_at = datetime.now(timezone.utc) - timedelta(days=40)
+    db_session.commit()
+    wrong = ConsumptionEvent(product_id=product.id, user_id=product.user_id, quantity=9, event_type="restocked", consumed_at=datetime.now(timezone.utc))
+    db_session.add(wrong)
+    db_session.commit()
+    db_session.add(ConsumptionEvent(
+        product_id=product.id, user_id=product.user_id, quantity=9, event_type="consumed",
+        consumed_at=datetime.now(timezone.utc), reverses_event_id=wrong.id,
+    ))
+    db_session.commit()
+
+    body = client.get("/me/metrics", params={"period": 7}).json()
+
+    assert body["total_ingresos"] == 0
+    assert all(day["quantity"] == 0 for day in body["ingresos_por_dia"])
+
+
+def test_a_product_that_is_gone_from_stock_still_counts_what_came_in(client, db_session, auth_user):
+    product = create_product(db_session, auth_user, nombre="Se fue", stock=0)
+    add_event(db_session, product, 5, "consumed", days_ago=0)  # entró con 5 y salieron los 5
+
+    assert client.get("/me/metrics", params={"period": 7}).json()["total_ingresos"] == 5
+
+
+def test_the_platform_incomes_add_up_every_user(admin_client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="A", stock=3)
+    create_product(db_session, auth_user, nombre="B", stock=4, user_id="otro-usuario")
+
+    body = admin_client.get("/admin/metrics", params={"period": 7}).json()
+
+    assert body["total_ingresos"] == 7

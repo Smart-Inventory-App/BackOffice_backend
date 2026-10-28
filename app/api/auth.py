@@ -7,7 +7,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import get_current_admin, get_current_user
 from app.models.admin import AdminUser
-from app.models.app_models import AuthUser
+from app.models.app_models import AuthUser, UserProfile
 from app.models.audit import AdminActivityLog, AdminRoleAudit
 from app.schemas.admin import (
     AdminCreate,
@@ -255,10 +255,14 @@ def google_login(body: GoogleLoginRequest, db: Session = Depends(get_db)):
 def me(db: Session = Depends(get_db), current: AuthUser = Depends(get_current_user)):
     admin = _get_admin_row(current.email, db)
     is_admin = bool(admin and admin.is_active)
+    # Solo el nombre y el apellido que la persona tiene en su perfil (si no los tiene, nada): lo mismo para un administrador
+    # que para un usuario común
+    profile = db.query(UserProfile).filter(UserProfile.user_id == str(current.id)).first()
+    full_name = " ".join(filter(None, [profile.first_name if profile else None, profile.last_name if profile else None])).strip()
     return MeResponse(
         id=str(current.id),
         email=current.email,
-        full_name=admin.full_name if admin else None,
+        full_name=full_name or None,
         is_admin=is_admin,
         is_active=bool(current.is_active),
         must_change_password=bool(current.must_change_password),
