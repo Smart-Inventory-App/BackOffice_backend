@@ -151,6 +151,8 @@ class MyStats(BaseModel):
     # Unidades en stock por categoría, productos por ubicación y cuándo vencen: los gráficos del dashboard
     stock_by_category: List[CategoryCount] = []
     products_by_location: List[CategoryCount] = []
+    # Unidades en stock por marca (solo los productos que tienen marca)
+    stock_by_brand: List[CategoryCount] = []
     expiry_buckets: List[CategoryCount] = []
 
 
@@ -241,6 +243,14 @@ class MyBulkEditRequest(BaseModel):
 
 class MyBulkEditResult(BaseModel):
     updated: int
+
+
+class MyBulkDeleteRequest(BaseModel):
+    product_ids: List[int]
+
+
+class MyBulkDeleteResult(BaseModel):
+    deleted: int
 
 
 class ProductSuggestion(BaseModel):

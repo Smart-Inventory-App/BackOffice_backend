@@ -113,6 +113,8 @@ Los eventos se guardan en UTC, pero **el día de cada movimiento, el «hoy» de 
 | GET | `/me/alerts/summary` | Cuántas alertas hay por nivel |
 | GET | `/me/changes?limit=&offset=` | «Últimos cambios»: entradas, salidas y modificaciones con el stock antes y después (se reconstruye hacia atrás desde el stock actual) |
 | GET | `/me/products/stock-total` | `{stock_total, products}`: unidades y cantidad de productos de la lista, con la misma búsqueda y los mismos filtros que `/me/products` (el resumen del inventario) |
+| DELETE | `/me/products/{id}` | Elimina un producto propio (con sus alertas y movimientos) |
+| POST | `/me/products/bulk-delete` | `{product_ids}` → `{deleted}`: elimina varios productos propios |
 | GET | `/me/metrics?period=` | Tendencias: consumo por día (días argentinos), totales y los **5** productos más consumidos (los lotes de un mismo nombre cuentan como uno); sin «menos usados». Además **ingresos por día** (`ingresos_por_dia`, `total_ingresos`): reposiciones sin corregir más el stock con el que se cargaron los productos creados en el período |
 | GET | `/me/profile`, PUT | Perfil con los límites de la app: nombre, apellido y usuario hasta 20 caracteres, días de las alertas de 2 a 90, hora del chequeo de 0 a 23 (Argentina), tipo de cuenta |
 | GET | `/me/profile/username-available?username=` | Si el nombre de usuario se puede usar; guardarlo repetido es un `409` (no distingue mayúsculas) |

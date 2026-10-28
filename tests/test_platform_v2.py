@@ -170,7 +170,7 @@ def test_the_stats_bring_what_the_dashboard_charts_need(client, db_session, auth
     }
     assert [(c["label"], c["count"]) for c in stats["stock_by_category"]] == [("Almacén", 15), ("Limpieza", 7), ("Lácteos", 5)]
     locations = {c["label"]: c["count"] for c in stats["products_by_location"]}
-    assert locations["Heladera"] == 2 and locations["Sin ubicación"] == 5
+    assert locations == {"Heladera": 2}  # lo que no tiene ubicación no es una ubicación
 
 
 # ── ingresos por día: reposiciones + el stock con el que se cargan los productos nuevos ──

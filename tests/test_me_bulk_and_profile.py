@@ -722,3 +722,86 @@ def test_el_stock_total_respeta_el_filtro_de_alertas(client, db_session, auth_us
     monkeypatch.setattr(me_api, "_alert_filter_ids", lambda db, uid, bajo_stock, por_vencer: {keep.id})
 
     assert client.get("/me/products/stock-total", params={"bajo_stock": True}).json() == {"stock_total": 2, "products": 1}
+
+
+def test_el_inventario_se_filtra_por_marca_tambien_en_export_y_stock_total(client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="Leche", marca="La Serenísima", stock=4)
+    create_product(db_session, auth_user, nombre="Yogur", marca="La Serenísima", stock=6)
+    create_product(db_session, auth_user, nombre="Arroz", marca="Gallo", stock=10)
+
+    data = client.get("/me/products", params={"marca": "la serenísima"}).json()
+    body = client.get("/me/products/export", params={"marca": "Gallo"}).text
+
+    assert sorted(p["nombre"] for p in data["items"]) == ["Leche", "Yogur"]
+    assert "Arroz" in body and "Leche" not in body
+    assert client.get("/me/products/stock-total", params={"marca": "Gallo"}).json() == {"stock_total": 10, "products": 1}
+
+
+def test_las_estadisticas_traen_el_stock_por_marca_y_dejan_afuera_lo_que_no_tiene_marca_ni_ubicacion(client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="Leche", marca="La Serenísima", stock=4, ubicacion="Heladera")
+    create_product(db_session, auth_user, nombre="Yogur", marca="La Serenísima", stock=6, ubicacion="Heladera")
+    create_product(db_session, auth_user, nombre="Arroz", marca="Gallo", stock=11, ubicacion="  ")
+    create_product(db_session, auth_user, nombre="Sal", marca=None, stock=50, ubicacion=None)
+    create_product(db_session, auth_user, nombre="Pan", marca="   ", stock=70, ubicacion=None)
+
+    stats = client.get("/me/stats").json()
+
+    assert [(b["label"], b["count"]) for b in stats["stock_by_brand"]] == [("Gallo", 11), ("La Serenísima", 10)]
+    assert [(c["label"], c["count"]) for c in stats["products_by_location"]] == [("Heladera", 2)]
+
+
+def test_el_usuario_elimina_un_producto_propio_con_sus_alertas_y_movimientos(client, db_session, auth_user):
+    from app.models.app_models import Alert, ConsumptionEvent, Product
+
+    product = create_product(db_session, auth_user, nombre="Leche", stock=3)
+    other = create_product(db_session, auth_user, nombre="Arroz", stock=3)
+    db_session.add(Alert(user_id=auth_user.id, product_id=product.id, type="stock_low", level="warning"))
+    db_session.add(ConsumptionEvent(product_id=product.id, user_id=str(auth_user.id), quantity=1, event_type="consumed"))
+    db_session.commit()
+    product_id = product.id
+
+    response = client.delete(f"/me/products/{product_id}")
+
+    assert response.status_code == 204
+    db_session.expire_all()
+    assert db_session.query(Product).filter(Product.id == product_id).first() is None
+    assert db_session.query(Alert).filter(Alert.product_id == product_id).count() == 0
+    assert db_session.query(Product).filter(Product.id == other.id).first() is not None
+
+
+def test_no_se_elimina_un_producto_ajeno_ni_inexistente(client, db_session, auth_user):
+    from app.models.app_models import Product
+
+    ajeno = create_product(db_session, auth_user, nombre="Ajeno", stock=1, user_id="otro-usuario")
+
+    assert client.delete(f"/me/products/{ajeno.id}").status_code == 404
+    assert client.delete("/me/products/999999").status_code == 404
+    assert db_session.query(Product).filter(Product.id == ajeno.id).first() is not None
+
+
+def test_el_usuario_elimina_varios_productos_en_lote_y_solo_los_propios(client, db_session, auth_user):
+    from app.models.app_models import Product
+
+    a = create_product(db_session, auth_user, nombre="Leche", stock=3)
+    b = create_product(db_session, auth_user, nombre="Yogur", stock=3)
+    c = create_product(db_session, auth_user, nombre="Arroz", stock=3)
+    d = create_product(db_session, auth_user, nombre="Sal", stock=3)
+    e = create_product(db_session, auth_user, nombre="Pan", stock=3)
+    ajeno = create_product(db_session, auth_user, nombre="Ajeno", stock=1, user_id="otro-usuario")
+    ids = [a.id, b.id, c.id, d.id, e.id, ajeno.id]
+    ajeno_id = ajeno.id
+
+    response = client.post("/me/products/bulk-delete", json={"product_ids": ids})
+
+    assert response.status_code == 200
+    assert response.json() == {"deleted": 5}
+    db_session.expire_all()
+    assert [p.nombre for p in db_session.query(Product).all()] == ["Ajeno"]
+    assert db_session.query(Product).first().id == ajeno_id
+
+
+def test_el_borrado_en_lote_pide_productos_y_que_existan(client, db_session, auth_user):
+    ajeno = create_product(db_session, auth_user, nombre="Ajeno", stock=1, user_id="otro-usuario")
+
+    assert client.post("/me/products/bulk-delete", json={"product_ids": []}).status_code == 400
+    assert client.post("/me/products/bulk-delete", json={"product_ids": [ajeno.id, 999999]}).status_code == 404

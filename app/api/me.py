@@ -20,6 +20,7 @@ from app.models.app_models import (
     DEFAULT_STOCK_MINIMO,
     DEFAULT_ALERT_CHECK_HOUR,
     DEFAULT_USER_TYPE,
+    Alert,
     AuthUser,
     ConsumptionEvent,
     Product,
@@ -40,6 +41,8 @@ from app.schemas.platform import (
     MAX_CATEGORIA,
     MAX_DESCRIPCION,
     MAX_NOMBRE,
+    MyBulkDeleteRequest,
+    MyBulkDeleteResult,
     MyBulkEditRequest,
     MyBulkEditResult,
     MyDefaults,
@@ -220,14 +223,22 @@ def my_stats(
     stocked = own.filter(Product.stock > 0).all()
     by_stock: dict[str, int] = {}
     by_location: dict[str, int] = {}
+    by_brand: dict[str, int] = {}
     for product in own.all():
-        by_location[product.ubicacion or "Sin ubicación"] = by_location.get(product.ubicacion or "Sin ubicación", 0) + 1
+        # Solo cuentan las ubicaciones y marcas que existen de verdad: «sin ubicación» o sin marca no es un lugar ni una marca
+        location = (product.ubicacion or "").strip()
+        if location:
+            by_location[location] = by_location.get(location, 0) + 1
+        brand = (product.marca or "").strip()
+        if brand:
+            by_brand[brand] = by_brand.get(brand, 0) + (product.stock or 0)
         by_stock[product.categoria or "Sin categoría"] = by_stock.get(product.categoria or "Sin categoría", 0) + product.stock
 
     return MyStats(
         total_products=total_products,
         stock_by_category=[CategoryCount(label=k, count=v) for k, v in sorted(by_stock.items(), key=lambda kv: -kv[1])],
         products_by_location=[CategoryCount(label=k, count=v) for k, v in sorted(by_location.items(), key=lambda kv: -kv[1])],
+        stock_by_brand=[CategoryCount(label=k, count=v) for k, v in sorted(by_brand.items(), key=lambda kv: (-kv[1], kv[0]))],
         expiry_buckets=_expiry_buckets(stocked, today),
         total_units=int(total_units or 0),
         products_with_image=products_with_image,
@@ -240,7 +251,7 @@ def my_stats(
     )
 
 
-def _filtered_products(db: Session, uid: str, search, categoria, ubicacion, vencido):
+def _filtered_products(db: Session, uid: str, search, categoria, ubicacion, vencido, marca=None):
     """Los productos del usuario que cumplen la búsqueda y los filtros que se resuelven con un WHERE."""
     query = db.query(Product).filter(Product.user_id == uid)
     if search:
@@ -250,6 +261,8 @@ def _filtered_products(db: Session, uid: str, search, categoria, ubicacion, venc
         query = query.filter(Product.categoria.ilike(categoria))
     if ubicacion:
         query = query.filter(Product.ubicacion.ilike(ubicacion))
+    if marca:
+        query = query.filter(Product.marca.ilike(marca))
     today = ar_today()
     if vencido is True:
         query = query.filter(Product.vencimiento.isnot(None), Product.vencimiento < today)
@@ -263,6 +276,7 @@ def my_products(
     search: Optional[str] = Query(None),
     categoria: Optional[str] = Query(None),
     ubicacion: Optional[str] = Query(None),
+    marca: Optional[str] = Query(None),
     vencido: Optional[bool] = Query(None),
     por_vencer: bool = Query(False),
     bajo_stock: bool = Query(False),
@@ -274,7 +288,7 @@ def my_products(
     current: AuthUser = Depends(get_current_user),
 ):
     uid = str(current.id)
-    query = _filtered_products(db, uid, search, categoria, ubicacion, vencido)
+    query = _filtered_products(db, uid, search, categoria, ubicacion, vencido, marca)
 
     alert_ids = _alert_filter_ids(db, uid, bajo_stock, por_vencer)
     if alert_ids is not None:
@@ -315,6 +329,7 @@ def export_my_products(
     search: Optional[str] = Query(None),
     categoria: Optional[str] = Query(None),
     ubicacion: Optional[str] = Query(None),
+    marca: Optional[str] = Query(None),
     vencido: Optional[bool] = Query(None),
     por_vencer: bool = Query(False),
     bajo_stock: bool = Query(False),
@@ -324,7 +339,7 @@ def export_my_products(
     current: AuthUser = Depends(get_current_user),
 ):
     uid = str(current.id)
-    query = _filtered_products(db, uid, search, categoria, ubicacion, vencido)
+    query = _filtered_products(db, uid, search, categoria, ubicacion, vencido, marca)
     query = only_sortable(query, sort_by, Product.vencimiento)
     products = page_of_products(
         query, sort_by, sort_dir, MY_SORTABLE_FIELDS,
@@ -356,6 +371,7 @@ def my_stock_total(
     search: Optional[str] = Query(None),
     categoria: Optional[str] = Query(None),
     ubicacion: Optional[str] = Query(None),
+    marca: Optional[str] = Query(None),
     vencido: Optional[bool] = Query(None),
     por_vencer: bool = Query(False),
     bajo_stock: bool = Query(False),
@@ -364,7 +380,7 @@ def my_stock_total(
 ):
     """Unidades en stock y cantidad de productos de la lista, con la misma búsqueda y los mismos filtros que el inventario."""
     uid = str(current.id)
-    products = _filtered_products(db, uid, search, categoria, ubicacion, vencido).all()
+    products = _filtered_products(db, uid, search, categoria, ubicacion, vencido, marca).all()
     alert_ids = _alert_filter_ids(db, uid, bajo_stock, por_vencer)
     if alert_ids is not None:
         products = [p for p in products if p.id in alert_ids]
@@ -787,6 +803,52 @@ def bulk_edit_my_products(
         f"{current.email} editó {len(products)} productos en lote ({campos}) desde el dashboard",
     )
     return MyBulkEditResult(updated=len(products))
+
+
+def _delete_own_products(products: list, db: Session, current: AuthUser) -> None:
+    """Borra los productos (y sus alertas; los movimientos se van por el ON DELETE CASCADE) y deja el registro de actividad."""
+    uid = str(current.id)
+    ids = [p.id for p in products]
+    nombres = ", ".join(f'"{p.nombre}"' for p in products[:3]) + (f" y {len(products) - 3} más" if len(products) > 3 else "")
+    # Sin ON DELETE CASCADE en alerts.product_id, Postgres rechaza el borrado si el producto tiene alertas.
+    db.query(Alert).filter(Alert.product_id.in_(ids)).delete(synchronize_session=False)
+    for product in products:
+        db.delete(product)
+    db.commit()
+    _log_activity(
+        db, "product_deleted", current.email, uid, current.email,
+        f"{current.email} eliminó {nombres} desde el dashboard",
+    )
+
+
+@router.post("/products/bulk-delete", response_model=MyBulkDeleteResult)
+def bulk_delete_my_products(
+    data: MyBulkDeleteRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    if not data.product_ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No se seleccionó ningún producto")
+    uid = str(current.id)
+    products = db.query(Product).filter(Product.id.in_(data.product_ids), Product.user_id == uid).all()
+    if not products:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No se encontraron productos")
+    _delete_own_products(products, db, current)
+    background_tasks.add_task(refresh_user_alerts, uid)
+    return MyBulkDeleteResult(deleted=len(products))
+
+
+@router.delete("/products/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_my_product(
+    product_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    product = _get_own_product(product_id, str(current.id), db)
+    _delete_own_products([product], db, current)
+    background_tasks.add_task(refresh_user_alerts, str(current.id))
 
 
 @router.patch("/products/{product_id}", response_model=MyProductResponse)
