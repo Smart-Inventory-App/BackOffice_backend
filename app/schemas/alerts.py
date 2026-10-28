@@ -35,7 +35,8 @@ class AlertSummary(BaseModel):
     critical: int
     warning: int
     total: int
-    # Productos con una alerta crítica de vencimiento y de stock mínimo: lo que muestra el inicio
+    # Productos con alertas de la opción «Vencimiento» (vencimiento y ritmo lento) y de la opción «Stock», de cualquier nivel:
+    # los mismos números que muestra el inicio de la app
     expiring: int
     low_stock: int
 

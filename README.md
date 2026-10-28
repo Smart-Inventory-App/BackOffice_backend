@@ -108,7 +108,7 @@ Los eventos se guardan en UTC, pero **el día de cada movimiento, el «hoy» de 
 
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
-| GET | `/me/stats` | Productos, unidades en stock, productos con una alerta crítica de vencimiento y de stock, vencidos, alertas críticas y advertencias, y lo que dibujan los gráficos del dashboard: unidades por categoría, productos por ubicación y cuándo vencen (vencidos, 0 a 7, 8 a 30, 31 a 90 y más de 90 días, sin vencimiento) |
+| GET | `/me/stats` | Productos, unidades en stock, productos con alertas de «Vencimiento» (vencimiento y ritmo lento) y de «Stock», de cualquier nivel y contando cada producto una sola vez (el mismo criterio que `/alerts/summary` de la app y que el inicio del celular), vencidos, alertas críticas y advertencias, y lo que dibujan los gráficos del dashboard: unidades por categoría, productos por ubicación y cuándo vencen (vencidos, 0 a 7, 8 a 30, 31 a 90 y más de 90 días, sin vencimiento) |
 | GET | `/me/alerts/` | Centro de alertas: filtros `tipo` (`stock` / `vencimiento`) y `level`; el resumen cuenta lo del tipo pedido, no lo del nivel |
 | GET | `/me/alerts/summary` | Cuántas alertas hay por nivel |
 | PUT/DELETE | `/me/products/{id}/events/{event_id}` | Corrige o deshace un registro del **Historial del Producto**: una entrada sigue siendo entrada y una salida sigue siendo salida (si no, 400); las notas automáticas dicen «Corrige el registro del 28/10/2026 15:29» / «Deshace el registro del ...», sin número |

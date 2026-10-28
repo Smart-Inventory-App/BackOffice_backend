@@ -105,7 +105,7 @@ def test_my_stats_respeta_el_umbral_propio_del_producto(client, db_session, auth
 
     data = client.get("/me/stats").json()
 
-    assert data["low_stock_products"] == 1
+    assert data["low_stock_products"] == 2  # los dos productos tienen alerta de stock: una crítica y una advertencia
     assert data["warning_alerts"] == 1
 
 

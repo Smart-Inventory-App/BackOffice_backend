@@ -108,8 +108,10 @@ def summarize(alerts: Iterable[AlertOut]) -> AlertSummary:
         critical=sum(1 for a in alerts if a.level == "critical"),
         warning=sum(1 for a in alerts if a.level == "warning"),
         total=len(alerts),
-        expiring=sum(1 for a in alerts if a.type == "expiry" and a.level == "critical"),
-        low_stock=sum(1 for a in alerts if a.type == STOCK_TYPE and a.level == "critical"),
+        # Igual que el resumen de la app (`/alerts/summary`) y que el inicio del celular: PRODUCTOS con alertas de la opción
+        # «Vencimiento» (vencimiento y ritmo lento) y de la opción «Stock», de cualquier nivel y también las de predicción
+        expiring=len({a.product_id for a in alerts if a.type in EXPIRY_TYPES}),
+        low_stock=len({a.product_id for a in alerts if a.type == STOCK_TYPE}),
     )
 
 

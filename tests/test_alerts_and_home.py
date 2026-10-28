@@ -98,7 +98,7 @@ def test_the_expiry_alerts_are_computed_with_today_and_the_rule_of_the_user(clie
 
     names = {a["product_name"]: a["level"] for a in body["items"]}
     assert names == {"Vencido": "critical", "Hoy": "critical", "Cerca": "warning"}
-    assert body["summary"] == {"critical": 2, "warning": 1, "total": 3, "expiring": 2, "low_stock": 0}
+    assert body["summary"] == {"critical": 2, "warning": 1, "total": 3, "expiring": 3, "low_stock": 0}
     first = body["items"][0]
     assert first["type"] == "expiry" and first["origin"] == "rule" and first["predictive"] is False
     assert first["limit_days"] == 7 and first["rule_scope"] == "general"
@@ -134,7 +134,7 @@ def test_the_stock_alerts_come_from_the_prediction_and_get_their_level_from_the_
     assert [(a["product_name"], a["level"]) for a in body["items"]] == [("Se acaba", "critical"), ("Casi", "warning")]
     first = body["items"][0]
     assert first["predictive"] is True and first["days_until_stockout"] == 3 and first["suggested_qty"] == 12
-    assert body["summary"]["low_stock"] == 1
+    assert body["summary"]["low_stock"] == 2  # los productos con alerta de stock, de cualquier nivel
 
 
 def test_a_slow_pace_alert_is_a_system_one_and_critical_inside_the_expiry_limit(client, db_session, auth_user):
@@ -184,7 +184,7 @@ def test_the_filters_by_level_and_type_keep_the_summary_of_the_type(client, db_s
     assert only_warning["summary"]["critical"] == 2  # el resumen no sigue al nivel, solo al tipo
 
     expiry = client.get("/me/alerts/", params={"tipo": "vencimiento"}).json()
-    assert expiry["summary"] == {"critical": 1, "warning": 1, "total": 2, "expiring": 1, "low_stock": 0}
+    assert expiry["summary"] == {"critical": 1, "warning": 1, "total": 2, "expiring": 2, "low_stock": 0}
 
 
 def test_the_alert_summary_endpoint_counts_everything(client, db_session, auth_user):
@@ -403,7 +403,7 @@ def test_the_stats_follow_the_same_alerts_as_the_center(client, db_session, auth
 
     assert stats["total_units"] == 10
     assert (stats["critical_alerts"], stats["warning_alerts"]) == (summary["critical"], summary["warning"]) == (1, 1)
-    assert stats["expiring_soon_products"] == summary["expiring"] == 1
+    assert stats["expiring_soon_products"] == summary["expiring"] == 2
 
 
 # ── imagen del producto como archivo ──────────────────────────────────────────
@@ -482,3 +482,25 @@ def test_a_storage_service_that_is_down_is_a_bad_gateway(client, storage):
     resp = client.post("/me/products/image", files=image_file())
 
     assert resp.status_code == 502 and "No se pudo subir la imagen" in resp.json()["detail"]
+
+
+# ── los números del inicio son los de la app: productos con alertas, de cualquier nivel ──
+
+def test_the_home_counts_products_with_alerts_of_any_level_like_the_app(client, db_session, auth_user):
+    # Un producto con una alerta de vencimiento Y una de ritmo lento cuenta una sola vez
+    both = create_product(db_session, auth_user, nombre="Las dos", stock=30, vencimiento=days_from_today(2))
+    create_stock_alert(db_session, auth_user, both, type="slow_pace", units_wasted=5)
+    slow = create_product(db_session, auth_user, nombre="Lento", stock=30, vencimiento=days_from_today(60))
+    create_stock_alert(db_session, auth_user, slow, type="slow_pace", units_wasted=2)
+    critical = create_product(db_session, auth_user, nombre="Se acaba", stock=2)
+    create_stock_alert(db_session, auth_user, critical, days_until_stockout=2)
+    near = create_product(db_session, auth_user, nombre="Casi", stock=9)
+    create_stock_alert(db_session, auth_user, near, days_until_stockout=9)
+    create_product(db_session, auth_user, nombre="Tranquilo", stock=50, vencimiento=days_from_today(90))
+
+    stats = client.get("/me/stats").json()
+    summary = client.get("/me/alerts/summary").json()
+
+    assert summary["expiring"] == stats["expiring_soon_products"] == 2  # «Las dos» y «Lento»
+    assert summary["low_stock"] == stats["low_stock_products"] == 2  # crítica y advertencia
+    assert len(client.get("/me/alerts/", params={"tipo": "vencimiento"}).json()["items"]) == 3  # 3 alertas, 2 productos
