@@ -240,10 +240,29 @@ def my_stats(
     )
 
 
+def _filtered_products(db: Session, uid: str, search, categoria, ubicacion, vencido):
+    """Los productos del usuario que cumplen la búsqueda y los filtros que se resuelven con un WHERE."""
+    query = db.query(Product).filter(Product.user_id == uid)
+    if search:
+        term = f"%{search}%"
+        query = query.filter(Product.nombre.ilike(term) | Product.marca.ilike(term))
+    if categoria:
+        query = query.filter(Product.categoria.ilike(categoria))
+    if ubicacion:
+        query = query.filter(Product.ubicacion.ilike(ubicacion))
+    today = ar_today()
+    if vencido is True:
+        query = query.filter(Product.vencimiento.isnot(None), Product.vencimiento < today)
+    elif vencido is False:
+        query = query.filter((Product.vencimiento.is_(None)) | (Product.vencimiento >= today))
+    return query
+
+
 @router.get("/products", response_model=PaginatedMyProducts)
 def my_products(
     search: Optional[str] = Query(None),
     categoria: Optional[str] = Query(None),
+    ubicacion: Optional[str] = Query(None),
     vencido: Optional[bool] = Query(None),
     por_vencer: bool = Query(False),
     bajo_stock: bool = Query(False),
@@ -255,19 +274,7 @@ def my_products(
     current: AuthUser = Depends(get_current_user),
 ):
     uid = str(current.id)
-    query = db.query(Product).filter(Product.user_id == uid)
-    if search:
-        term = f"%{search}%"
-        query = query.filter(Product.nombre.ilike(term) | Product.marca.ilike(term))
-    if categoria:
-        query = query.filter(Product.categoria.ilike(categoria))
-    today = ar_today()
-    if vencido is True:
-        query = query.filter(Product.vencimiento.isnot(None), Product.vencimiento < today)
-    elif vencido is False:
-        query = query.filter(
-            (Product.vencimiento.is_(None)) | (Product.vencimiento >= today)
-        )
+    query = _filtered_products(db, uid, search, categoria, ubicacion, vencido)
 
     alert_ids = _alert_filter_ids(db, uid, bajo_stock, por_vencer)
     if alert_ids is not None:
@@ -307,6 +314,7 @@ def export_my_products(
     format: str = Query("csv", pattern="^(csv|xlsx)$"),
     search: Optional[str] = Query(None),
     categoria: Optional[str] = Query(None),
+    ubicacion: Optional[str] = Query(None),
     vencido: Optional[bool] = Query(None),
     por_vencer: bool = Query(False),
     bajo_stock: bool = Query(False),
@@ -316,19 +324,7 @@ def export_my_products(
     current: AuthUser = Depends(get_current_user),
 ):
     uid = str(current.id)
-    query = db.query(Product).filter(Product.user_id == uid)
-    if search:
-        term = f"%{search}%"
-        query = query.filter(Product.nombre.ilike(term) | Product.marca.ilike(term))
-    if categoria:
-        query = query.filter(Product.categoria.ilike(categoria))
-    today = ar_today()
-    if vencido is True:
-        query = query.filter(Product.vencimiento.isnot(None), Product.vencimiento < today)
-    elif vencido is False:
-        query = query.filter(
-            (Product.vencimiento.is_(None)) | (Product.vencimiento >= today)
-        )
+    query = _filtered_products(db, uid, search, categoria, ubicacion, vencido)
     query = only_sortable(query, sort_by, Product.vencimiento)
     products = page_of_products(
         query, sort_by, sort_dir, MY_SORTABLE_FIELDS,
@@ -353,6 +349,26 @@ def export_my_products(
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.get("/products/stock-total")
+def my_stock_total(
+    search: Optional[str] = Query(None),
+    categoria: Optional[str] = Query(None),
+    ubicacion: Optional[str] = Query(None),
+    vencido: Optional[bool] = Query(None),
+    por_vencer: bool = Query(False),
+    bajo_stock: bool = Query(False),
+    db: Session = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """Unidades en stock y cantidad de productos de la lista, con la misma búsqueda y los mismos filtros que el inventario."""
+    uid = str(current.id)
+    products = _filtered_products(db, uid, search, categoria, ubicacion, vencido).all()
+    alert_ids = _alert_filter_ids(db, uid, bajo_stock, por_vencer)
+    if alert_ids is not None:
+        products = [p for p in products if p.id in alert_ids]
+    return {"stock_total": sum(p.stock or 0 for p in products), "products": len(products)}
 
 
 @router.get("/products/filters/options")

@@ -682,3 +682,43 @@ def test_my_products_con_bajo_stock_tambien_ordena_alfabeticamente_y_sin_los_que
     data = client.get("/me/products", params={"bajo_stock": True, "sort_by": "vencimiento"}).json()
     assert [p["nombre"] for p in data["items"]] == ["Álvaro", "banana"]
     assert data["total"] == 2
+
+
+# ── ubicación y stock total del inventario ───────────────────────────────────
+
+def test_my_products_filtra_por_ubicacion_sin_distinguir_mayusculas(client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="Leche", ubicacion="Heladera")
+    create_product(db_session, auth_user, nombre="Arroz", ubicacion="Alacena")
+
+    data = client.get("/me/products", params={"ubicacion": "heladera"}).json()
+
+    assert [p["nombre"] for p in data["items"]] == ["Leche"]
+
+
+def test_el_export_tambien_filtra_por_ubicacion(client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="Leche", ubicacion="Heladera")
+    create_product(db_session, auth_user, nombre="Arroz", ubicacion="Alacena")
+
+    body = client.get("/me/products/export", params={"ubicacion": "Alacena"}).text
+
+    assert "Arroz" in body and "Leche" not in body
+
+
+def test_el_stock_total_suma_los_productos_de_la_lista_con_sus_filtros(client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="Leche", categoria="Lácteos", ubicacion="Heladera", stock=4)
+    create_product(db_session, auth_user, nombre="Yogur", categoria="Lácteos", ubicacion="Alacena", stock=6)
+    create_product(db_session, auth_user, nombre="Arroz", categoria="Almacén", ubicacion="Alacena", stock=10, vencimiento=date(2020, 1, 1))
+    create_product(db_session, auth_user, nombre="Ajeno", stock=99, user_id="otro-usuario")
+
+    assert client.get("/me/products/stock-total").json() == {"stock_total": 20, "products": 3}
+    assert client.get("/me/products/stock-total", params={"categoria": "lácteos"}).json() == {"stock_total": 10, "products": 2}
+    assert client.get("/me/products/stock-total", params={"ubicacion": "alacena", "search": "yog"}).json() == {"stock_total": 6, "products": 1}
+    assert client.get("/me/products/stock-total", params={"vencido": True}).json() == {"stock_total": 10, "products": 1}
+
+
+def test_el_stock_total_respeta_el_filtro_de_alertas(client, db_session, auth_user, monkeypatch):
+    keep = create_product(db_session, auth_user, nombre="Se acaba", stock=2)
+    create_product(db_session, auth_user, nombre="Sobra", stock=50)
+    monkeypatch.setattr(me_api, "_alert_filter_ids", lambda db, uid, bajo_stock, por_vencer: {keep.id})
+
+    assert client.get("/me/products/stock-total", params={"bajo_stock": True}).json() == {"stock_total": 2, "products": 1}
