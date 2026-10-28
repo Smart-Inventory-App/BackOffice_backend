@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, time, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
@@ -10,7 +10,9 @@ from app.api.auth import _auth_request
 from app.core.database import get_db
 from app.core.security import get_current_admin
 from app.models.admin import AdminUser
-from app.models.app_models import AuthUser, Product, UserProfile
+from app.core import alerts_view
+from app.core.argentina import AR_TZ, ar_today
+from app.models.app_models import CONSUMPTION_EVENT_TYPES, AuthUser, ConsumptionEvent, Product, UserProfile
 from app.models.audit import AdminRoleAudit, UserStatusAudit
 from app.schemas.platform import (
     AdminProductResponse,
@@ -113,6 +115,24 @@ def get_user(
     uid = str(user.id)
     prof = db.query(UserProfile).filter(UserProfile.user_id == uid).first()
     products = db.query(Product).filter(Product.user_id == uid).order_by(Product.created_at.desc()).all()
+    alerts = alerts_view.alerts_for(db, uid)
+    summary = alerts_view.summarize(alerts)
+    levels = alerts_view.levels_by_product(db, [p.id for p in products])
+
+    # Consumo y reposición de los últimos 30 días contando hoy (días argentinos), sin las correcciones del historial
+    month_start = datetime.combine(ar_today() - timedelta(days=29), time.min, tzinfo=AR_TZ).astimezone(timezone.utc).replace(tzinfo=None)
+    reversed_ids = db.query(ConsumptionEvent.reverses_event_id).filter(ConsumptionEvent.reverses_event_id.isnot(None))
+    movements = (
+        db.query(ConsumptionEvent.event_type, func.coalesce(func.sum(ConsumptionEvent.quantity), 0))
+        .filter(
+            ConsumptionEvent.user_id == uid,
+            ConsumptionEvent.consumed_at >= month_start,
+            ConsumptionEvent.reverses_event_id.is_(None),
+            ConsumptionEvent.id.notin_(reversed_ids),
+        )
+        .group_by(ConsumptionEvent.event_type)
+        .all()
+    )
 
     return AppUserDetail(
         id=uid,
@@ -124,6 +144,12 @@ def get_user(
         first_name=prof.first_name if prof else None,
         last_name=prof.last_name if prof else None,
         product_count=len(products),
+        total_units=sum(p.stock for p in products),
+        critical_alerts=summary.critical,
+        warning_alerts=summary.warning,
+        consumed_last_30d=sum(int(qty) for kind, qty in movements if kind in CONSUMPTION_EVENT_TYPES),
+        restocked_last_30d=sum(int(qty) for kind, qty in movements if kind == "restocked"),
+        alerts=alerts,
         products=[
             AdminProductResponse(
                 id=p.id,
@@ -135,7 +161,12 @@ def get_user(
                 descripcion=p.descripcion,
                 imagen_url=p.imagen_url,
                 ubicacion=p.ubicacion,
+                codigo_barras=p.codigo_barras,
+                stock_minimo=p.stock_minimo,
+                dias_alerta_vencimiento=p.dias_alerta_vencimiento,
                 created_at=p.created_at,
+                alert_level=levels.get(p.id, (None, []))[0],
+                alert_types=levels.get(p.id, (None, []))[1],
                 owner=ProductOwner(user_id=uid, email=user.email),
             )
             for p in products

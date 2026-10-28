@@ -1,7 +1,9 @@
 from datetime import date, datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
+
+from app.schemas.alerts import AlertOut
 
 
 class CategoryCount(BaseModel):
@@ -16,9 +18,17 @@ class DashboardStats(BaseModel):
     new_users_last_7d: int
     total_products: int
     products_with_image: int
-    low_stock_products: int          # stock <= 1
-    expiring_soon_products: int      # vencimiento within next 7 days
+    # Con las mismas reglas que la app: productos con una alerta crítica de stock mínimo (cobertura) y de vencimiento
+    low_stock_products: int
+    expiring_soon_products: int
     expired_products: int
+    total_units: int = 0
+    critical_alerts: int = 0
+    warning_alerts: int = 0
+    users_with_alerts: int = 0
+    # Consumo y reposición de toda la plataforma en los últimos 7 días (hora argentina)
+    consumed_last_7d: int = 0
+    restocked_last_7d: int = 0
     products_by_category: List[CategoryCount]
     top_users_by_products: List["UserProductCount"]
     products_per_day_last_14d: List["DayCount"]
@@ -82,7 +92,12 @@ class AdminProductResponse(BaseModel):
     imagen_url: Optional[str] = None
     ubicacion: Optional[str] = None
     codigo_barras: Optional[str] = None
+    stock_minimo: Optional[int] = None
+    dias_alerta_vencimiento: Optional[int] = None
     created_at: Optional[datetime] = None
+    # La alerta más grave que tiene hoy el producto (critical | warning) y de qué tipos son; vacío si no tiene
+    alert_level: Optional[str] = None
+    alert_types: List[str] = []
     owner: ProductOwner
 
 
@@ -103,6 +118,12 @@ class AdminProductGroupDetail(AdminProductGroupSummary):
 
 class AppUserDetail(AppUserResponse):
     products: List[AdminProductResponse]
+    total_units: int = 0
+    critical_alerts: int = 0
+    warning_alerts: int = 0
+    consumed_last_30d: int = 0
+    restocked_last_30d: int = 0
+    alerts: List[AlertOut] = []
 
 
 class PaginatedUsers(BaseModel):
@@ -117,10 +138,15 @@ class PaginatedProducts(BaseModel):
 
 class MyStats(BaseModel):
     total_products: int
+    # Suma del stock de todos los productos
+    total_units: int = 0
     products_with_image: int
+    # Productos con una alerta crítica de stock mínimo y de vencimiento: los mismos números que la app
     low_stock_products: int
     expiring_soon_products: int
     expired_products: int
+    critical_alerts: int = 0
+    warning_alerts: int = 0
     products_by_category: List[CategoryCount]
 
 
@@ -144,11 +170,26 @@ class MyProductResponse(BaseModel):
         from_attributes = True
 
 
+class StockChangeOut(BaseModel):
+    """Un cambio del stock de un producto: una entrada, una salida o una modificación, con el stock antes y después."""
+
+    id: str
+    kind: Literal["entrada", "salida", "modificacion"]
+    stock_before: int
+    stock_after: int
+    quantity: int
+    occurred_at: datetime
+    producto: MyProductResponse
+
+
 # Los mismos máximos que el alta de `app_backend`: un producto cargado desde el
 # backoffice tiene que poder editarse y escanearse desde la app.
 MAX_NOMBRE = 20
 MAX_CATEGORIA = 20
 MAX_DESCRIPCION = 400
+# Las reglas propias de un producto, con los mismos topes que la app
+MAX_STOCK_MINIMO = 9_999_999
+MAX_DIAS_ALERTA_VENCIMIENTO = 999
 
 
 class MyProductCreate(BaseModel):
@@ -164,8 +205,8 @@ class MyProductCreate(BaseModel):
         default=None,
         description="GTIN de 8, 12, 13 o 14 dígitos. Se valida el verificador y se normaliza a 13.",
     )
-    stock_minimo: Optional[int] = Field(None, gt=0)
-    dias_alerta_vencimiento: Optional[int] = Field(None, gt=0)
+    stock_minimo: Optional[int] = Field(None, ge=1, le=MAX_STOCK_MINIMO)
+    dias_alerta_vencimiento: Optional[int] = Field(None, ge=1, le=MAX_DIAS_ALERTA_VENCIMIENTO)
 
 
 class MyProductUpdate(BaseModel):
@@ -178,8 +219,8 @@ class MyProductUpdate(BaseModel):
     imagen_url: Optional[str] = None
     ubicacion: Optional[str] = None
     codigo_barras: Optional[str] = None
-    stock_minimo: Optional[int] = Field(None, gt=0)
-    dias_alerta_vencimiento: Optional[int] = Field(None, gt=0)
+    stock_minimo: Optional[int] = Field(None, ge=1, le=MAX_STOCK_MINIMO)
+    dias_alerta_vencimiento: Optional[int] = Field(None, ge=1, le=MAX_DIAS_ALERTA_VENCIMIENTO)
 
 
 class PaginatedMyProducts(BaseModel):
@@ -215,21 +256,36 @@ class MyDefaults(BaseModel):
     last_ubicacion: Optional[str] = None
 
 
+# Límites del perfil, los mismos que valida la app: nombre, apellido y usuario hasta 20 caracteres; los días de las
+# alertas de 2 a 90; la hora del chequeo diario de 0 a 23 (hora argentina).
+PROFILE_TEXT_MAX = 20
+ALERT_DAYS_MIN = 2
+ALERT_DAYS_MAX = 90
+
+UserType = Literal["individuo", "comercio"]
+
+
 class MyProfileResponse(BaseModel):
     email: str
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     username: Optional[str] = None
+    # Días de cobertura mínimos (stock mínimo) y días de anticipación del vencimiento, para todos los productos
     stock_minimo: int
     dias_alerta_vencimiento: int
+    # Hora argentina (0 a 23) del chequeo diario de alertas
+    alert_check_hour: int = 5
+    user_type: UserType = "individuo"
 
 
 class MyProfileUpdate(BaseModel):
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    username: Optional[str] = None
-    stock_minimo: Optional[int] = Field(None, gt=0)
-    dias_alerta_vencimiento: Optional[int] = Field(None, gt=0)
+    first_name: Optional[str] = Field(None, max_length=PROFILE_TEXT_MAX)
+    last_name: Optional[str] = Field(None, max_length=PROFILE_TEXT_MAX)
+    username: Optional[str] = Field(None, max_length=PROFILE_TEXT_MAX)
+    stock_minimo: Optional[int] = Field(None, ge=ALERT_DAYS_MIN, le=ALERT_DAYS_MAX)
+    dias_alerta_vencimiento: Optional[int] = Field(None, ge=ALERT_DAYS_MIN, le=ALERT_DAYS_MAX)
+    alert_check_hour: Optional[int] = Field(None, ge=0, le=23)
+    user_type: Optional[UserType] = None
 
 
 class BulkProductRow(BaseModel):
@@ -322,7 +378,6 @@ class MyMetrics(BaseModel):
     total_entradas: int
     consumo_por_dia: List[ConsumoPorDia]
     top_productos: List[ProductoConsumo]
-    productos_menos_usados: List[ProductoConsumo]
 
 
 class ActivityEntry(BaseModel):

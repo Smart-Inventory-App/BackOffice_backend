@@ -74,7 +74,7 @@ def test_an_unknown_kind_of_exit_is_rejected_by_the_backoffice(client, db_sessio
 def test_the_day_of_an_event_is_the_argentine_one():
     from datetime import datetime, timedelta, timezone
 
-    from app.api.metrics import _ar_day
+    from app.core.argentina import ar_day as _ar_day
 
     # 02:30 UTC del 13 son las 23:30 del 12 en Argentina; sin zona horaria se asume UTC
     assert _ar_day(datetime(2026, 10, 13, 2, 30)).isoformat() == "2026-10-12"

@@ -162,7 +162,8 @@ def test_get_bearer_token_real_reenvia_el_token_tal_cual(db_session, ocr_transpo
 
 def test_es_valido_acepta_lo_que_normaliza_y_rechaza_lo_que_no():
     assert barcode.es_valido("7794640172021") is True
-    assert barcode.es_valido("7794640172020") is False  # dígito verificador incorrecto
+    assert barcode.es_valido("7794640172020") is True  # no se exige el dígito verificador
+    assert barcode.es_valido("12345") is False  # el largo no es el de un código de barras
     assert barcode.es_valido(None) is False
 
 

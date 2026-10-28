@@ -6,11 +6,15 @@ ese producto se llama `Yogur Ser frutilla`. Una comparación exacta no los une, 
 crear un producto nuevo por cada abreviatura del comercio rompe el inventario en
 pedazos que después nadie junta.
 
+Es una regla duplicada a propósito: `app_backend` tiene la misma copia en el mismo
+camino, y las dos tienen que dar el mismo resultado para el mismo texto.
+
 Acá no se decide nada: se devuelven candidatos con su puntaje y **el usuario
 confirma**. Cuando ningún candidato llega al umbral, el texto crudo del OCR
 vuelve tal cual para que lo edite, que es la única salida honesta cuando no se
 sabe de qué producto se trata.
 """
+import re
 import unicodedata
 from difflib import SequenceMatcher
 from typing import Iterable, Optional
@@ -104,6 +108,69 @@ def buscar(
         (producto, puntaje)
         for producto in productos
         if (puntaje := puntuar(leido, producto)) >= umbral
+    ]
+    encontrados.sort(key=lambda par: (-par[1], par[0].nombre.lower()))
+    return encontrados[:maximo]
+
+
+# Palabras más cortas que esto (de, la, 1l...) coinciden con cualquier cosa y no dicen nada del producto.
+PALABRA_MIN = 3
+
+
+def _palabras(texto: Optional[str]) -> set[str]:
+    return {p for p in re.findall(r"[a-z0-9]+", normalizar(texto)) if len(p) >= PALABRA_MIN}
+
+
+def puntuar_texto(texto: str, producto) -> float:
+    """
+    El mejor puntaje del producto contra un texto leído de una etiqueta: nombre, marca **y descripción**.
+
+    `puntuar` solo mira el nombre (y la marca pegada al nombre). Una etiqueta trae mucho más texto que el nombre
+    (la marca, el detalle, las leyendas), y el producto del inventario puede estar guardado con otro nombre pero
+    la misma marca o la misma descripción. Cada campo aporta su puntaje y vale el mejor.
+    """
+    puntajes = [puntuar(texto, producto)]
+    leidas = _palabras(texto)
+    completo = normalizar(texto)
+
+    nombre = _palabras(producto.nombre)
+    cobertura_nombre = len(nombre & leidas) / len(nombre) if nombre else 0.0
+    if nombre:
+        # Todas las palabras del nombre están en lo leído (aunque haya otras de más)
+        puntajes.append(0.95 if cobertura_nombre == 1 else 0.9 * cobertura_nombre)
+
+    marca = _palabras(producto.marca)
+    if marca and marca <= leidas:
+        puntajes.append(0.6 + 0.3 * cobertura_nombre)
+
+    descripcion = _palabras(producto.descripcion)
+    if descripcion:
+        puntajes.append(0.7 * len(descripcion & leidas) / len(descripcion))
+
+    # Un texto corto escrito a mano ("yog") que está dentro del nombre, la marca o la descripción
+    if len(completo) >= PALABRA_MIN:
+        for valor, puntaje in ((producto.nombre, 0.9), (producto.marca, 0.75), (producto.descripcion, 0.7)):
+            if completo in normalizar(valor):
+                puntajes.append(puntaje)
+                break
+
+    return max(puntajes)
+
+
+def buscar_texto(
+    texto: Optional[str],
+    productos: Iterable,
+    umbral: float = UMBRAL_CANDIDATO,
+    maximo: int = 10,
+) -> list[tuple[object, float]]:
+    """Los productos del usuario cuyo nombre, marca o descripción se parecen al texto leído, de mejor a peor."""
+    if not texto or not texto.strip():
+        return []
+
+    encontrados = [
+        (producto, puntaje)
+        for producto in productos
+        if (puntaje := puntuar_texto(texto, producto)) >= umbral
     ]
     encontrados.sort(key=lambda par: (-par[1], par[0].nombre.lower()))
     return encontrados[:maximo]

@@ -1,20 +1,25 @@
 import csv
 import io
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.core import barcode
+from app.core import alerts_view, barcode, matching
+from app.core.app_backend import refresh_user_alerts
+from app.core.argentina import ar_hour_to_utc, ar_today, utc_hour_to_ar
 from app.core.database import get_db
 from app.core.export import products_to_csv, products_to_xlsx
 from app.core.security import get_current_user
 from app.core.sorting import alphabetical_key, only_sortable, page_of_products
+from app.api import products as admin_products
 from app.models.app_models import (
     DEFAULT_DIAS_ALERTA_VENCIMIENTO,
     DEFAULT_STOCK_MINIMO,
+    DEFAULT_ALERT_CHECK_HOUR,
+    DEFAULT_USER_TYPE,
     AuthUser,
     ConsumptionEvent,
     Product,
@@ -22,6 +27,8 @@ from app.models.app_models import (
 )
 from app.models.audit import AdminActivityLog
 from app.schemas.platform import (
+    AdminProductGroupDetail,
+    AdminProductGroupSummary,
     BulkCommitRequest,
     BulkCommitResult,
     BulkParsedRow,
@@ -43,8 +50,10 @@ from app.schemas.platform import (
     MyProfileUpdate,
     MyStats,
     PaginatedMyProducts,
+    PROFILE_TEXT_MAX,
     ProductSuggestion,
     SalidaRequest,
+    StockChangeOut,
 )
 
 router = APIRouter(prefix="/me", tags=["me"])
@@ -120,20 +129,23 @@ def _get_or_create_profile(user_id: str, db: Session) -> UserProfile:
     return profile
 
 
-def _passes_alert_filters(
-    p: Product, profile: UserProfile, bajo_stock: bool, por_vencer: bool, today: date
-) -> bool:
-    """Cada producto puede tener su propia regla de stock mínimo / días de
-    alerta de vencimiento; si no la tiene, se usa la del perfil del usuario."""
+# Nota de los movimientos que salen de editar el stock de un producto (la app los muestra como «modificación»)
+STOCK_EDIT_NOTE = "Modificación de stock"
+
+
+def _alert_filter_ids(db: Session, user_id: str, bajo_stock: bool, por_vencer: bool) -> Optional[set]:
+    """Ids de los productos con una alerta de stock bajo y/o de próximo vencimiento, con las reglas vigentes (la del
+    producto o, si no tiene, la del perfil) y el mismo criterio que el Centro de Alertas. `None` si no se filtra."""
+    if not (bajo_stock or por_vencer):
+        return None
+    alerts = alerts_view.alerts_for(db, user_id)
+    ids = None
     if bajo_stock:
-        threshold = p.stock_minimo or profile.stock_minimo or DEFAULT_STOCK_MINIMO
-        if not (p.stock < threshold):
-            return False
+        ids = {a.product_id for a in alerts if a.type == alerts_view.STOCK_TYPE}
     if por_vencer:
-        dias = p.dias_alerta_vencimiento or profile.dias_alerta_vencimiento or DEFAULT_DIAS_ALERTA_VENCIMIENTO
-        if not (p.vencimiento and today <= p.vencimiento <= today + timedelta(days=dias)):
-            return False
-    return True
+        expiring = {a.product_id for a in alerts if a.type == "expiry" and a.days_to_expiry >= 0}
+        ids = expiring if ids is None else ids & expiring
+    return ids
 
 
 def _find_matching_product(
@@ -161,16 +173,14 @@ def my_stats(
     current: AuthUser = Depends(get_current_user),
 ):
     uid = str(current.id)
-    today = date.today()
-    profile = _get_or_create_profile(uid, db)
+    today = ar_today()
     own = db.query(Product).filter(Product.user_id == uid)
 
     total_products = own.count()
+    total_units = db.query(func.coalesce(func.sum(Product.stock), 0)).filter(Product.user_id == uid).scalar()
     products_with_image = own.filter(Product.imagen_url.isnot(None), Product.imagen_url != "").count()
-    products_all = own.all()
-    low_stock = sum(1 for p in products_all if _passes_alert_filters(p, profile, True, False, today))
-    expiring_soon = sum(1 for p in products_all if _passes_alert_filters(p, profile, False, True, today))
-    expired = own.filter(Product.vencimiento < today).count()
+    summary = alerts_view.summarize(alerts_view.alerts_for(db, uid, today))
+    expired = own.filter(Product.vencimiento < today, Product.stock > 0).count()
 
     by_category = [
         CategoryCount(label=row[0] or "Sin categoría", count=row[1])
@@ -183,10 +193,13 @@ def my_stats(
 
     return MyStats(
         total_products=total_products,
+        total_units=int(total_units or 0),
         products_with_image=products_with_image,
-        low_stock_products=low_stock,
-        expiring_soon_products=expiring_soon,
+        low_stock_products=summary.low_stock,
+        expiring_soon_products=summary.expiring,
         expired_products=expired,
+        critical_alerts=summary.critical,
+        warning_alerts=summary.warning,
         products_by_category=by_category,
     )
 
@@ -212,20 +225,19 @@ def my_products(
         query = query.filter(Product.nombre.ilike(term) | Product.marca.ilike(term))
     if categoria:
         query = query.filter(Product.categoria.ilike(categoria))
+    today = ar_today()
     if vencido is True:
-        query = query.filter(Product.vencimiento.isnot(None), Product.vencimiento < date.today())
+        query = query.filter(Product.vencimiento.isnot(None), Product.vencimiento < today)
     elif vencido is False:
         query = query.filter(
-            (Product.vencimiento.is_(None)) | (Product.vencimiento >= date.today())
+            (Product.vencimiento.is_(None)) | (Product.vencimiento >= today)
         )
 
-    if bajo_stock or por_vencer:
-        # bajo_stock/por_vencer dependen de la regla de cada producto (o la del
-        # perfil si el producto no tiene una propia), así que no se puede
-        # resolver con un único WHERE — se filtra en Python.
-        profile = _get_or_create_profile(uid, db)
-        today = date.today()
-        candidates = [p for p in query.all() if _passes_alert_filters(p, profile, bajo_stock, por_vencer, today)]
+    alert_ids = _alert_filter_ids(db, uid, bajo_stock, por_vencer)
+    if alert_ids is not None:
+        # bajo_stock/por_vencer dependen de la regla de cada producto (o la del perfil si el producto no tiene una
+        # propia) y del modelo predictivo, así que no se pueden resolver con un único WHERE — se filtra en Python.
+        candidates = [p for p in query.all() if p.id in alert_ids]
         total = len(candidates)
         if sort_by == "vencimiento":
             # Los productos sin fecha de vencimiento no entran en este orden
@@ -274,11 +286,12 @@ def export_my_products(
         query = query.filter(Product.nombre.ilike(term) | Product.marca.ilike(term))
     if categoria:
         query = query.filter(Product.categoria.ilike(categoria))
+    today = ar_today()
     if vencido is True:
-        query = query.filter(Product.vencimiento.isnot(None), Product.vencimiento < date.today())
+        query = query.filter(Product.vencimiento.isnot(None), Product.vencimiento < today)
     elif vencido is False:
         query = query.filter(
-            (Product.vencimiento.is_(None)) | (Product.vencimiento >= date.today())
+            (Product.vencimiento.is_(None)) | (Product.vencimiento >= today)
         )
     query = only_sortable(query, sort_by, Product.vencimiento)
     products = page_of_products(
@@ -286,10 +299,9 @@ def export_my_products(
         (Product.created_at.desc(), Product.id.desc()), Product.id, lambda p: p.nombre,
     )
 
-    if bajo_stock or por_vencer:
-        profile = _get_or_create_profile(uid, db)
-        today = date.today()
-        products = [p for p in products if _passes_alert_filters(p, profile, bajo_stock, por_vencer, today)]
+    alert_ids = _alert_filter_ids(db, uid, bajo_stock, por_vencer)
+    if alert_ids is not None:
+        products = [p for p in products if p.id in alert_ids]
 
     if format == "xlsx":
         content = products_to_xlsx(products)
@@ -319,48 +331,117 @@ def my_filter_options(
     return {"categorias": sorted(categorias), "ubicaciones": sorted(ubicaciones), "marcas": sorted(marcas)}
 
 
+def _clean_username(username: Optional[str]) -> Optional[str]:
+    """El nombre de usuario sin espacios en los bordes; vacío es lo mismo que no tener."""
+    cleaned = (username or "").strip()
+    return cleaned or None
+
+
+def _same_username(a: Optional[str], b: Optional[str]) -> bool:
+    """Dos nombres son el mismo aunque cambien las mayúsculas: «Ana» y «ana» no pueden convivir."""
+    return a is not None and b is not None and a.lower() == b.lower()
+
+
+def _username_taken(username: str, user_id: str, db: Session) -> bool:
+    """Si otra cuenta ya tiene ese nombre de usuario."""
+    return (
+        db.query(UserProfile.user_id)
+        .filter(func.lower(UserProfile.username) == username.lower(), UserProfile.user_id != user_id)
+        .first()
+        is not None
+    )
+
+
+def _profile_response(email: str, profile: UserProfile) -> MyProfileResponse:
+    check_hour = profile.alert_check_hour if profile.alert_check_hour is not None else DEFAULT_ALERT_CHECK_HOUR
+    return MyProfileResponse(
+        email=email,
+        first_name=profile.first_name,
+        last_name=profile.last_name,
+        username=profile.username,
+        stock_minimo=profile.stock_minimo or DEFAULT_STOCK_MINIMO,
+        dias_alerta_vencimiento=profile.dias_alerta_vencimiento or DEFAULT_DIAS_ALERTA_VENCIMIENTO,
+        alert_check_hour=utc_hour_to_ar(check_hour),
+        user_type=profile.user_type or DEFAULT_USER_TYPE,
+    )
+
+
 @router.get("/profile", response_model=MyProfileResponse)
 def my_profile(
     db: Session = Depends(get_db),
     current: AuthUser = Depends(get_current_user),
 ):
-    profile = _get_or_create_profile(str(current.id), db)
-    return MyProfileResponse(
-        email=current.email,
-        first_name=profile.first_name,
-        last_name=profile.last_name,
-        username=profile.username,
-        stock_minimo=profile.stock_minimo or DEFAULT_STOCK_MINIMO,
-        dias_alerta_vencimiento=profile.dias_alerta_vencimiento or DEFAULT_DIAS_ALERTA_VENCIMIENTO,
-    )
+    return _profile_response(current.email, _get_or_create_profile(str(current.id), db))
+
+
+@router.get("/profile/username-available")
+def username_available(
+    username: str = Query(..., max_length=PROFILE_TEXT_MAX),
+    db: Session = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """Si el nombre de usuario se puede usar. Un nombre que ya es el de esta cuenta cuenta como disponible."""
+    uid = str(current.id)
+    cleaned = _clean_username(username)
+    if cleaned is None:
+        return {"available": True}
+    own = db.query(UserProfile.username).filter(UserProfile.user_id == uid).scalar()
+    if _same_username(own, cleaned):
+        return {"available": True}
+    return {"available": not _username_taken(cleaned, uid, db)}
 
 
 @router.put("/profile", response_model=MyProfileResponse)
 def update_my_profile(
     data: MyProfileUpdate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current: AuthUser = Depends(get_current_user),
 ):
-    profile = _get_or_create_profile(str(current.id), db)
+    uid = str(current.id)
+    profile = _get_or_create_profile(uid, db)
+    fields = data.model_dump(exclude_unset=True)
+    if "username" in fields:
+        username = _clean_username(data.username)
+        # Solo se valida si el nombre cambia: quien ya tiene un nombre repetido (de antes de esta regla) puede seguir
+        # guardando su perfil sin tocarlo
+        if username is not None and not _same_username(profile.username, username) and _username_taken(username, uid, db):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ese nombre de usuario ya está en uso.")
+        profile.username = username
     if data.first_name is not None:
         profile.first_name = data.first_name
     if data.last_name is not None:
         profile.last_name = data.last_name
-    if data.username is not None:
-        profile.username = data.username
+    rules_changed = False
     if data.stock_minimo is not None:
+        rules_changed |= profile.stock_minimo != data.stock_minimo
         profile.stock_minimo = data.stock_minimo
     if data.dias_alerta_vencimiento is not None:
+        rules_changed |= profile.dias_alerta_vencimiento != data.dias_alerta_vencimiento
         profile.dias_alerta_vencimiento = data.dias_alerta_vencimiento
+    if data.alert_check_hour is not None:
+        profile.alert_check_hour = ar_hour_to_utc(data.alert_check_hour)
+    if data.user_type is not None:
+        profile.user_type = data.user_type
     db.commit()
     db.refresh(profile)
-    return MyProfileResponse(
-        email=current.email,
-        first_name=profile.first_name,
-        last_name=profile.last_name,
-        username=profile.username,
-        stock_minimo=profile.stock_minimo or DEFAULT_STOCK_MINIMO,
-        dias_alerta_vencimiento=profile.dias_alerta_vencimiento or DEFAULT_DIAS_ALERTA_VENCIMIENTO,
+    if rules_changed:
+        # Con otra regla, las alertas de stock pueden ser otras: el app_backend las vuelve a evaluar, sin mandar avisos
+        background_tasks.add_task(refresh_user_alerts, uid)
+    return _profile_response(current.email, profile)
+
+
+def _suggestion(p: Product) -> ProductSuggestion:
+    return ProductSuggestion(
+        id=p.id,
+        nombre=p.nombre,
+        marca=p.marca,
+        categoria=p.categoria,
+        ubicacion=p.ubicacion,
+        vencimiento=p.vencimiento,
+        stock=p.stock,
+        stock_minimo=p.stock_minimo,
+        dias_alerta_vencimiento=p.dias_alerta_vencimiento,
     )
 
 
@@ -377,20 +458,133 @@ def suggest_products(
         .limit(10)
         .all()
     )
-    return [
-        ProductSuggestion(
-            id=p.id,
-            nombre=p.nombre,
-            marca=p.marca,
-            categoria=p.categoria,
-            ubicacion=p.ubicacion,
-            vencimiento=p.vencimiento,
-            stock=p.stock,
-            stock_minimo=p.stock_minimo,
-            dias_alerta_vencimiento=p.dias_alerta_vencimiento,
-        )
-        for p in rows
+    return [_suggestion(p) for p in rows]
+
+
+@router.get("/products/match", response_model=list[ProductSuggestion])
+def match_products(
+    q: str = Query(..., min_length=1, max_length=1000),
+    db: Session = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """Los productos del usuario que se parecen a un texto leído de una etiqueta, de mejor a peor.
+
+    A diferencia de `/products/suggest` (que busca dentro del nombre), compara el texto con el nombre, la marca y la
+    descripción de cada producto, y tolera abreviaturas y palabras de más.
+    """
+    rows = db.query(Product).filter(Product.user_id == str(current.id)).all()
+    return [_suggestion(p) for p, _ in matching.buscar_texto(q, rows)]
+
+
+@router.get("/products/groups", response_model=list[AdminProductGroupSummary])
+def my_product_groups(
+    q: str = Query(..., min_length=1),
+    db: Session = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """El stock total de «el mismo producto» (igual nombre y categoría, de cualquier marca) entre los del usuario, para
+    los que el nombre contiene `q`. Como en la app, sin distinguir mayúsculas, tildes ni espacios sobrantes."""
+    needle = alphabetical_key(" ".join(q.split()))
+    if not needle:
+        return []
+    found = [
+        admin_products._summarize(lots)
+        for key, lots in admin_products._groups(db, str(current.id)).items()
+        if needle in key[0]
     ]
+    found.sort(key=lambda g: (alphabetical_key(g.nombre), alphabetical_key(g.categoria)))
+    return found[:10]
+
+
+@router.get("/products/group", response_model=AdminProductGroupDetail)
+def my_product_group(
+    nombre: str = Query(..., min_length=1),
+    categoria: str = Query(..., min_length=1),
+    db: Session = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """Todos los productos del usuario con ese nombre y categoría y su stock total, por vencimiento."""
+    uid = str(current.id)
+    lots = admin_products._groups(db, uid).get(admin_products._group_key(nombre, categoria))
+    if not lots:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Producto no encontrado")
+    emails = {uid: current.email}
+    ordered = sorted(lots, key=lambda p: (p.vencimiento is None, p.vencimiento or date.max, p.id))
+    levels = alerts_view.levels_by_product(db, [p.id for p in ordered])
+    return AdminProductGroupDetail(
+        **admin_products._summarize(lots).model_dump(),
+        productos=[admin_products._to_response(p, emails, levels) for p in ordered],
+    )
+
+
+def _naive_utc(value: datetime) -> datetime:
+    """Los instantes se comparan sin zona (en UTC): la base devuelve unos con zona y otros sin ella."""
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
+@router.get("/changes", response_model=list[StockChangeOut])
+def my_stock_changes(
+    limit: int = Query(5, ge=1, le=50),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """Los últimos cambios de stock del usuario, del más nuevo al más viejo (como «Últimos cambios» de la app).
+
+    Incluye las entradas, las salidas y las modificaciones hechas al editar un producto. Cada cambio trae el stock antes
+    y después, que se reconstruye hacia atrás desde el stock actual con los movimientos del producto. Las correcciones no
+    aparecen: queda el movimiento corregido. `offset` salta los más nuevos para pedir las páginas siguientes.
+    """
+    uid = str(current.id)
+    products = {p.id: p for p in db.query(Product).filter(Product.user_id == uid).all()}
+    events = (
+        db.query(ConsumptionEvent)
+        .filter(ConsumptionEvent.user_id == uid)
+        .order_by(ConsumptionEvent.consumed_at.desc(), ConsumptionEvent.id.desc())
+        .all()
+    )
+    reversed_ids = {e.reverses_event_id for e in events if e.reverses_event_id is not None}
+
+    running = {product_id: product.stock for product_id, product in products.items()}
+    changes: list[tuple[tuple[datetime, int], StockChangeOut]] = []
+    for event in events:
+        product = products.get(event.product_id)
+        if product is None:
+            continue
+        after = running[product.id]
+        before = after - _stock_effect(event.event_type, event.quantity)
+        running[product.id] = before
+        if event.reverses_event_id is not None or event.id in reversed_ids:
+            continue
+        if (event.note or "").startswith(STOCK_EDIT_NOTE):
+            kind = "modificacion"
+        else:
+            kind = "entrada" if event.event_type == "restocked" else "salida"
+        changes.append((
+            (_naive_utc(event.consumed_at), 1 + event.id),
+            StockChangeOut(
+                id=f"event-{event.id}", kind=kind, stock_before=before, stock_after=after, quantity=event.quantity,
+                occurred_at=event.consumed_at, producto=MyProductResponse.model_validate(product, from_attributes=True),
+            ),
+        ))
+
+    # Lo que queda después de deshacer todos los movimientos es el stock con el que se cargó el producto
+    for product_id, product in products.items():
+        initial = running[product_id]
+        if product.created_at is None or initial <= 0:
+            continue
+        changes.append((
+            (_naive_utc(product.created_at), 0),
+            StockChangeOut(
+                id=f"created-{product_id}", kind="entrada", stock_before=0, stock_after=initial, quantity=initial,
+                occurred_at=product.created_at, producto=MyProductResponse.model_validate(product, from_attributes=True),
+            ),
+        ))
+
+    changes.sort(key=lambda item: item[0], reverse=True)
+    return [change for _, change in changes[offset:offset + limit]]
 
 
 @router.get("/products/by-barcode/{codigo}", response_model=Optional[ProductSuggestion])
@@ -461,11 +655,14 @@ def _normalizar_codigo(codigo):
 @router.post("/products", response_model=MyProductResponse, status_code=201)
 def create_my_product(
     data: MyProductCreate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current: AuthUser = Depends(get_current_user),
 ):
     uid = str(current.id)
     data.codigo_barras = _normalizar_codigo(data.codigo_barras)
+    # Con un producto nuevo (o más stock de uno que ya estaba) las alertas de stock pueden cambiar
+    background_tasks.add_task(refresh_user_alerts, uid)
 
     profile = _get_or_create_profile(uid, db)
     profile.last_categoria = data.categoria
@@ -544,6 +741,7 @@ def bulk_edit_my_products(
 def update_my_product(
     product_id: int,
     data: MyProductUpdate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current: AuthUser = Depends(get_current_user),
 ):
@@ -562,9 +760,11 @@ def update_my_product(
 
     if new_stock is not None and new_stock != old_stock:
         if new_stock < old_stock:
-            _log_consumption(db, product.id, str(current.id), old_stock - new_stock, "consumed", actor_email=current.email)
+            _log_consumption(db, product.id, str(current.id), old_stock - new_stock, "consumed", actor_email=current.email, note=STOCK_EDIT_NOTE)
         else:
-            _log_consumption(db, product.id, str(current.id), new_stock - old_stock, "restocked", actor_email=current.email)
+            _log_consumption(db, product.id, str(current.id), new_stock - old_stock, "restocked", actor_email=current.email, note=STOCK_EDIT_NOTE)
+    if any(field in update_dict for field in ("stock", "stock_minimo", "dias_alerta_vencimiento", "vencimiento")):
+        background_tasks.add_task(refresh_user_alerts, str(current.id))
 
     if changed_fields:
         _log_activity(
@@ -577,6 +777,7 @@ def update_my_product(
 @router.post("/products/salida", response_model=MyProductResponse)
 def register_salida(
     data: SalidaRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current: AuthUser = Depends(get_current_user),
 ):
@@ -593,6 +794,7 @@ def register_salida(
     db.refresh(product)
 
     _log_consumption(db, product.id, uid, data.quantity, data.event_type, actor_email=current.email, note=data.note)
+    background_tasks.add_task(refresh_user_alerts, uid)
     motivo = {"expired": "vencido", "sold": "vendido", "rented": "alquilado"}.get(data.event_type, "consumido")
     _log_activity(
         db, "product_updated", current.email, uid, current.email,

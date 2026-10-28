@@ -13,10 +13,14 @@ from app.schemas.admin import (
     AdminResponse,
     CheckEmailRequest,
     CheckEmailResponse,
+    ForgotPasswordRequest,
     LoginRequest,
     MeResponse,
     RegisterRequest,
+    ResetPasswordRequest,
+    ResetTokenResponse,
     SetPasswordRequest,
+    VerifyCodeRequest,
     TokenResponse,
 )
 
@@ -58,7 +62,8 @@ def check_email(body: CheckEmailRequest, db: Session = Depends(get_db)):
 
     user = db.query(AuthUser).filter(AuthUser.email == body.email).first()
     if user and user.is_active:
-        return CheckEmailResponse(exists=True, is_admin=False, password_set=True)
+        has_password = user.has_password is not False
+        return CheckEmailResponse(exists=True, is_admin=False, password_set=has_password, google_only=not has_password)
 
     return CheckEmailResponse(exists=False, is_admin=False, password_set=False)
 
@@ -83,6 +88,47 @@ def register(body: RegisterRequest):
         return
     detail = r.json().get("detail") if r.headers.get("content-type", "").startswith("application/json") else None
     raise HTTPException(status_code=r.status_code, detail=_REGISTER_ERROR_MESSAGES.get(detail, detail or "No se pudo crear la cuenta"))
+
+
+_RECOVERY_ERROR_MESSAGES = {
+    "auth.invalid_code": "El código no es válido.",
+    "auth.invalid_or_expired_code": "El código no es válido o venció. Pedí uno nuevo.",
+    "auth.too_many_attempts": "Demasiados intentos. Pedí un código nuevo.",
+    "auth.invalid_or_expired_token": "El enlace venció. Volvé a empezar.",
+    "auth.password_too_short": "La contraseña debe tener al menos 8 caracteres.",
+    "auth.password_same_as_current": "La contraseña nueva no puede ser igual a la actual.",
+}
+
+
+def _recovery_error(r: httpx.Response, fallback: str) -> HTTPException:
+    detail = r.json().get("detail") if r.headers.get("content-type", "").startswith("application/json") else None
+    return HTTPException(status_code=r.status_code, detail=_RECOVERY_ERROR_MESSAGES.get(detail, fallback))
+
+
+@router.post("/forgot-password")
+def forgot_password(body: ForgotPasswordRequest):
+    """Recuperar (o crear, en una cuenta de Google) la contraseña: `auth` manda un código por mail. Responde lo mismo
+    exista o no la cuenta, para no revelar quién tiene una."""
+    r = _auth_post("/auth/forgot-password", {"email": body.email})
+    if r.status_code == 200:
+        return {"detail": "sent"}
+    raise _recovery_error(r, "No se pudo enviar el código.")
+
+
+@router.post("/verify-code", response_model=ResetTokenResponse)
+def verify_code(body: VerifyCodeRequest):
+    r = _auth_post("/auth/verify-code", {"email": body.email, "code": body.code})
+    if r.status_code == 200:
+        return ResetTokenResponse(reset_token=r.json()["reset_token"])
+    raise _recovery_error(r, "No se pudo verificar el código.")
+
+
+@router.post("/reset-password", status_code=status.HTTP_204_NO_CONTENT)
+def reset_password(body: ResetPasswordRequest):
+    r = _auth_post("/auth/reset-password", {"reset_token": body.reset_token, "new_password": body.new_password})
+    if r.status_code in (200, 204):
+        return
+    raise _recovery_error(r, "No se pudo cambiar la contraseña.")
 
 
 @router.post("/set-password", status_code=status.HTTP_204_NO_CONTENT)

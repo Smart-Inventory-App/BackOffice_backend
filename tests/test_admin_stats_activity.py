@@ -6,12 +6,13 @@ from datetime import date, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
+from app.core.argentina import ar_today
 from app.core.database import get_db
 from app.core.security import get_current_admin
 from app.main import app
 from app.models.app_models import AuthUser
 from app.models.audit import AdminActivityLog, AdminRoleAudit, UserStatusAudit
-from tests.conftest import create_admin, create_product
+from tests.conftest import create_admin, create_product, create_stock_alert
 
 
 @pytest.fixture()
@@ -31,9 +32,10 @@ def admin_client(db_session):
 # ── tablero ──────────────────────────────────────────────────────────────────
 
 def test_dashboard_cuenta_usuarios_y_productos(admin_client, db_session, auth_user):
-    create_product(db_session, auth_user, categoria="Lácteos", stock=0, imagen_url="http://x/1.jpg")
-    create_product(db_session, auth_user, categoria="Lácteos", stock=5, vencimiento=date.today())
-    create_product(db_session, auth_user, categoria="Limpieza", stock=3, vencimiento=date.today() - timedelta(days=2))
+    poco = create_product(db_session, auth_user, categoria="Lácteos", stock=1, imagen_url="http://x/1.jpg")
+    create_stock_alert(db_session, auth_user, poco, days_until_stockout=2)
+    create_product(db_session, auth_user, categoria="Lácteos", stock=5, vencimiento=ar_today())
+    create_product(db_session, auth_user, categoria="Limpieza", stock=3, vencimiento=ar_today() - timedelta(days=2))
 
     data = admin_client.get("/admin/stats/").json()
 
@@ -41,9 +43,12 @@ def test_dashboard_cuenta_usuarios_y_productos(admin_client, db_session, auth_us
     assert data["active_users"] >= 1
     assert data["total_products"] == 3
     assert data["products_with_image"] == 1
-    assert data["low_stock_products"] == 1  # stock <= 1
-    assert data["expiring_soon_products"] == 1  # vence hoy
+    assert data["low_stock_products"] == 1  # alcanza para menos de 7 días
+    assert data["expiring_soon_products"] == 2  # vence hoy y ya venció: las dos tienen una alerta crítica
     assert data["expired_products"] == 1
+    assert data["total_units"] == 9
+    assert data["critical_alerts"] == 3
+    assert data["users_with_alerts"] == 1
     labels = {c["label"] for c in data["products_by_category"]}
     assert labels == {"Lácteos", "Limpieza"}
     assert len(data["products_per_day_last_14d"]) == 14

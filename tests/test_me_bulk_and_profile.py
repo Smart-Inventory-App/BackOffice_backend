@@ -10,6 +10,8 @@ tenían test propio.
 import io
 from datetime import date, datetime, timedelta
 
+from app.core.argentina import ar_today
+
 import pytest
 from openpyxl import Workbook
 from sqlalchemy.exc import SQLAlchemyError
@@ -17,7 +19,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.api import me as me_api
 from app.models.app_models import ConsumptionEvent, Product, UserProfile
 from app.models.audit import AdminActivityLog
-from tests.conftest import create_product
+from tests.conftest import create_product, create_stock_alert
 
 CSV_HEADER = "nombre,categoria,stock,codigo_barras,vencimiento,marca,ubicacion,descripcion,imagen_url,stock_minimo,dias_alerta_vencimiento\n"
 
@@ -40,8 +42,10 @@ def test_profile_se_crea_con_los_valores_por_defecto(client, db_session, auth_us
     data = client.get("/me/profile").json()
 
     assert data["email"] == auth_user.email
-    assert data["stock_minimo"] == 10
+    assert data["stock_minimo"] == 7
     assert data["dias_alerta_vencimiento"] == 7
+    assert data["alert_check_hour"] == 5
+    assert data["user_type"] == "individuo"
     assert db_session.query(UserProfile).filter(UserProfile.user_id == str(auth_user.id)).count() == 1
 
 
@@ -72,29 +76,37 @@ def test_profile_username_y_apellido_tambien_se_actualizan(client, db_session, a
 # ── stats ────────────────────────────────────────────────────────────────────
 
 def test_my_stats_cuenta_bajo_stock_y_por_vencer(client, db_session, auth_user):
-    create_product(db_session, auth_user, stock=1, categoria="Lácteos")  # bajo el default de 10
-    create_product(db_session, auth_user, stock=50, vencimiento=date.today(), categoria="Lácteos")
+    bajo = create_product(db_session, auth_user, stock=1, categoria="Lácteos")
+    create_stock_alert(db_session, auth_user, bajo, days_until_stockout=2)  # alcanza para menos que los 7 días del perfil
+    create_product(db_session, auth_user, stock=50, vencimiento=ar_today(), categoria="Lácteos")
     create_product(db_session, auth_user, stock=50, vencimiento=date(2020, 1, 1), categoria="Vieja")
     create_product(db_session, auth_user, stock=50, imagen_url="http://x/1.jpg", categoria="Lácteos")
 
     data = client.get("/me/stats").json()
 
     assert data["total_products"] == 4
+    assert data["total_units"] == 151
     assert data["products_with_image"] == 1
     assert data["low_stock_products"] == 1
-    assert data["expiring_soon_products"] == 1
+    # vence hoy y ya venció: las dos tienen una alerta crítica de vencimiento, como en el inicio de la app
+    assert data["expiring_soon_products"] == 2
     assert data["expired_products"] == 1
+    assert data["critical_alerts"] == 3
+    assert data["warning_alerts"] == 0
     labels = {c["label"] for c in data["products_by_category"]}
     assert "Lácteos" in labels
 
 
 def test_my_stats_respeta_el_umbral_propio_del_producto(client, db_session, auth_user):
-    create_product(db_session, auth_user, stock=5, stock_minimo=3)  # no está bajo con su propio umbral
-    create_product(db_session, auth_user, stock=2, stock_minimo=3)  # sí lo está
+    lejos = create_product(db_session, auth_user, stock=5, stock_minimo=3)
+    cerca = create_product(db_session, auth_user, stock=2, stock_minimo=3)
+    create_stock_alert(db_session, auth_user, lejos, days_until_stockout=3)  # con su límite de 3 días no es crítica
+    create_stock_alert(db_session, auth_user, cerca, days_until_stockout=2)  # alcanza para menos de 3 días
 
     data = client.get("/me/stats").json()
 
     assert data["low_stock_products"] == 1
+    assert data["warning_alerts"] == 1
 
 
 # ── listado ──────────────────────────────────────────────────────────────────
@@ -134,8 +146,10 @@ def test_my_products_se_puede_ordenar_por_cualquier_campo_sortable(client, db_se
 
 def test_my_products_bajo_stock_y_por_vencer_se_resuelven_en_python(client, db_session, auth_user):
     bajo = create_product(db_session, auth_user, nombre="Bajo", stock=1)
+    create_stock_alert(db_session, auth_user, bajo)
     create_product(db_session, auth_user, nombre="Normal", stock=99)
-    por_vencer = create_product(db_session, auth_user, nombre="PorVencer", vencimiento=date.today(), stock=99)
+    por_vencer = create_product(db_session, auth_user, nombre="PorVencer", vencimiento=ar_today(), stock=99)
+    create_product(db_session, auth_user, nombre="Vencido", vencimiento=date(2020, 1, 1), stock=99)  # ya venció: no es «por vencer»
 
     data = client.get("/me/products", params={"bajo_stock": True}).json()
     assert [p["id"] for p in data["items"]] == [bajo.id]
@@ -146,8 +160,9 @@ def test_my_products_bajo_stock_y_por_vencer_se_resuelven_en_python(client, db_s
 
 @pytest.mark.parametrize("campo", ["nombre", "stock", "vencimiento", "categoria", None])
 def test_my_products_bajo_stock_se_puede_ordenar(client, db_session, auth_user, campo):
-    create_product(db_session, auth_user, nombre="B", stock=1, categoria="B", vencimiento=date(2027, 1, 1))
-    create_product(db_session, auth_user, nombre="A", stock=1, categoria="A", vencimiento=date(2026, 1, 1))
+    for nombre, vencimiento in (("B", date(2027, 1, 1)), ("A", date(2026, 1, 1))):
+        producto = create_product(db_session, auth_user, nombre=nombre, stock=1, categoria=nombre, vencimiento=vencimiento)
+        create_stock_alert(db_session, auth_user, producto)
 
     params = {"bajo_stock": True, "sort_dir": "desc"}
     if campo:
@@ -193,7 +208,7 @@ def test_export_my_products_con_vencido_y_orden(client, db_session, auth_user):
 
 
 def test_export_my_products_con_bajo_stock(client, db_session, auth_user):
-    create_product(db_session, auth_user, nombre="Bajo", stock=1)
+    create_stock_alert(db_session, auth_user, create_product(db_session, auth_user, nombre="Bajo", stock=1))
     create_product(db_session, auth_user, nombre="Alto", stock=99)
 
     resp = client.get("/me/products/export", params={"format": "csv", "bajo_stock": True})
@@ -660,9 +675,8 @@ def test_my_products_las_paginas_no_repiten_productos(client, db_session, auth_u
 
 
 def test_my_products_con_bajo_stock_tambien_ordena_alfabeticamente_y_sin_los_que_no_vencen(client, db_session, auth_user):
-    create_product(db_session, auth_user, nombre="banana", stock=1, vencimiento=date(2027, 2, 1))
-    create_product(db_session, auth_user, nombre="Álvaro", stock=1, vencimiento=date(2027, 1, 1))
-    create_product(db_session, auth_user, nombre="Sin fecha", stock=1)
+    for nombre, vencimiento in (("banana", date(2027, 2, 1)), ("Álvaro", date(2027, 1, 1)), ("Sin fecha", None)):
+        create_stock_alert(db_session, auth_user, create_product(db_session, auth_user, nombre=nombre, stock=1, vencimiento=vencimiento))
 
     assert mis_nombres(client, bajo_stock=True, sort_by="nombre") == ["Álvaro", "banana", "Sin fecha"]
     data = client.get("/me/products", params={"bajo_stock": True, "sort_by": "vencimiento"}).json()

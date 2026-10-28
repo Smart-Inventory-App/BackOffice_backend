@@ -38,6 +38,8 @@ class CheckEmailResponse(BaseModel):
     exists: bool
     is_admin: bool
     password_set: bool
+    # Cuenta creada con Google que todavía no tiene contraseña: tiene que crear una desde «Olvidé mi contraseña»
+    google_only: bool = False
 
 
 class MeResponse(BaseModel):
@@ -62,3 +64,21 @@ class SetPasswordRequest(BaseModel):
 class RegisterRequest(BaseModel):
     email: EmailStr
     password: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class VerifyCodeRequest(BaseModel):
+    email: EmailStr
+    code: str
+
+
+class ResetPasswordRequest(BaseModel):
+    reset_token: str
+    new_password: str
+
+
+class ResetTokenResponse(BaseModel):
+    reset_token: str

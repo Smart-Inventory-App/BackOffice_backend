@@ -44,7 +44,7 @@ def test_check_reconoce_un_admin_activo(db_client, db_session):
 
     data = db_client.post("/admin/auth/check", json={"email": "admin@x.com"}).json()
 
-    assert data == {"exists": True, "is_admin": True, "password_set": True}
+    assert data == {"exists": True, "is_admin": True, "password_set": True, "google_only": False}
 
 
 def test_check_reconoce_un_usuario_de_la_app_sin_ser_admin(db_client, db_session):
@@ -53,13 +53,13 @@ def test_check_reconoce_un_usuario_de_la_app_sin_ser_admin(db_client, db_session
 
     data = db_client.post("/admin/auth/check", json={"email": "user@x.com"}).json()
 
-    assert data == {"exists": True, "is_admin": False, "password_set": True}
+    assert data == {"exists": True, "is_admin": False, "password_set": True, "google_only": False}
 
 
 def test_check_un_email_desconocido_no_existe(db_client, db_session):
     data = db_client.post("/admin/auth/check", json={"email": "nadie@x.com"}).json()
 
-    assert data == {"exists": False, "is_admin": False, "password_set": False}
+    assert data == {"exists": False, "is_admin": False, "password_set": False, "google_only": False}
 
 
 def test_check_un_admin_inactivo_no_cuenta_como_admin(db_client, db_session):
@@ -505,3 +505,81 @@ def test_el_listado_de_admins_nunca_trae_codigos(admin_client, db_session):
 
     assert resp.status_code == 200
     assert all(a["invite_token"] is None for a in resp.json())
+
+
+def test_check_avisa_cuando_la_cuenta_se_creo_con_google_y_no_tiene_contrasena(db_client, db_session):
+    db_session.add(AuthUser(email="google@x.com", hashed_password="x", is_active=True, has_password=False))
+    db_session.commit()
+
+    data = db_client.post("/admin/auth/check", json={"email": "google@x.com"}).json()
+
+    assert data == {"exists": True, "is_admin": False, "password_set": False, "google_only": True}
+
+
+# ── recuperar la contraseña (delega en `auth`) ────────────────────────────────
+
+def test_el_codigo_de_recuperacion_se_pide_a_auth(db_client, auth_service):
+    recibidas = auth_service(lambda request: httpx.Response(200, json={"detail": "auth.reset_code_sent"}))
+
+    resp = db_client.post("/admin/auth/forgot-password", json={"email": "user@x.com"})
+
+    assert resp.status_code == 200 and resp.json() == {"detail": "sent"}
+    assert recibidas[0].url.path == "/auth/forgot-password"
+
+
+def test_si_auth_falla_al_pedir_el_codigo_se_explica(db_client, auth_service):
+    auth_service(lambda request: httpx.Response(500, json={"detail": "boom"}))
+
+    resp = db_client.post("/admin/auth/forgot-password", json={"email": "user@x.com"})
+
+    assert resp.status_code == 500 and resp.json()["detail"] == "No se pudo enviar el código."
+
+
+def test_el_codigo_correcto_devuelve_el_permiso_para_cambiar_la_contrasena(db_client, auth_service):
+    recibidas = auth_service(lambda request: httpx.Response(200, json={"reset_token": "abc"}))
+
+    resp = db_client.post("/admin/auth/verify-code", json={"email": "user@x.com", "code": "123456"})
+
+    assert resp.json() == {"reset_token": "abc"}
+    assert recibidas[0].url.path == "/auth/verify-code"
+
+
+@pytest.mark.parametrize(
+    "detail, status_code, mensaje",
+    [
+        ("auth.invalid_or_expired_code", 400, "El código no es válido o venció. Pedí uno nuevo."),
+        ("auth.too_many_attempts", 429, "Demasiados intentos. Pedí un código nuevo."),
+        ("auth.otra_cosa", 400, "No se pudo verificar el código."),
+    ],
+)
+def test_un_codigo_incorrecto_se_explica_en_castellano(db_client, auth_service, detail, status_code, mensaje):
+    auth_service(lambda request: httpx.Response(status_code, json={"detail": detail}))
+
+    resp = db_client.post("/admin/auth/verify-code", json={"email": "user@x.com", "code": "000000"})
+
+    assert resp.status_code == status_code and resp.json()["detail"] == mensaje
+
+
+def test_la_contrasena_nueva_se_guarda_en_auth(db_client, auth_service):
+    recibidas = auth_service(lambda request: httpx.Response(200, json=None))
+
+    resp = db_client.post("/admin/auth/reset-password", json={"reset_token": "abc", "new_password": "Nueva1234"})
+
+    assert resp.status_code == 204
+    assert recibidas[0].url.path == "/auth/reset-password"
+
+
+def test_una_contrasena_igual_a_la_actual_o_corta_se_explica(db_client, auth_service):
+    auth_service(lambda request: httpx.Response(400, json={"detail": "auth.password_same_as_current"}))
+
+    resp = db_client.post("/admin/auth/reset-password", json={"reset_token": "abc", "new_password": "Misma1234"})
+
+    assert resp.status_code == 400 and resp.json()["detail"] == "La contraseña nueva no puede ser igual a la actual."
+
+
+def test_un_error_sin_cuerpo_json_usa_el_mensaje_por_defecto(db_client, auth_service):
+    auth_service(lambda request: httpx.Response(502, text="Bad gateway"))
+
+    resp = db_client.post("/admin/auth/reset-password", json={"reset_token": "abc", "new_password": "Nueva1234"})
+
+    assert resp.status_code == 502 and resp.json()["detail"] == "No se pudo cambiar la contraseña."

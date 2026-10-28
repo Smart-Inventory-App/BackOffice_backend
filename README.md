@@ -27,7 +27,9 @@ Puerto: **8002**.
 | `ocr_scan_audit` | **este servicio** | un renglón por ejecución del módulo de OCR; es lo único que queda de cada escaneo |
 | `auth_users` | servicio `auth` | listar/habilitar/deshabilitar usuarios de la app |
 | `products` | `app_backend` | visualizar/eliminar productos cargados por los usuarios |
-| `user_profiles` | `app_backend` | datos de perfil (nombre, usuario) |
+| `user_profiles` | `app_backend` | datos de perfil (nombre, usuario, reglas de alerta, hora del chequeo, tipo de cuenta) |
+| `alerts` | `app_backend` | se lee: las alertas del modelo predictivo (stock bajo por cobertura y ritmo lento) |
+| `consumption_events` | `app_backend` | se lee y se escribe: cada entrada y salida de stock (tendencias, «Últimos cambios») |
 
 > El backoffice **solo crea** sus propias tablas (`admin_users` y las de auditoría). Las demás ya las crean sus servicios dueños; acá solo se leen/gestionan filas.
 
@@ -44,25 +46,32 @@ Puerto: **8002**.
 | GET | `/admin/auth/admins` | Listar administradores |
 | POST | `/admin/auth/admins` | Crear un nuevo administrador |
 
-### Dashboard
+| POST | `/admin/auth/forgot-password` | Pide a `auth` un código por mail para recuperar (o crear, en una cuenta de Google) la contraseña |
+| POST | `/admin/auth/verify-code` | Verifica el código y devuelve el permiso para cambiar la contraseña |
+| POST | `/admin/auth/reset-password` | Guarda la contraseña nueva |
+
+`POST /admin/auth/check` además devuelve `google_only`: la cuenta se creó con Google y todavía no tiene contraseña (el ingreso ofrece crear una desde «Olvidé mi contraseña»).
+
+### Dashboard y tendencias de la plataforma
 
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
-| GET | `/admin/stats/` | Métricas globales (usuarios, productos, vencimientos, categorías, etc.) |
+| GET | `/admin/stats/` | Usuarios, productos y unidades, alertas críticas y advertencias de toda la plataforma (con las reglas de cada usuario), usuarios con alertas, consumo y reposición de los últimos 7 días, categorías |
+| GET | `/admin/metrics?period=` | Tendencias de consumo de toda la plataforma (mismo formato que `/me/metrics`) |
 
 ### Usuarios
 
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
 | GET | `/admin/users/` | Listar usuarios (filtros `search`, `status_filter`) |
-| GET | `/admin/users/{id}` | Detalle de usuario + sus productos |
+| GET | `/admin/users/{id}` | Detalle de usuario: unidades, alertas críticas y advertencias, consumo y reposición de los últimos 30 días, sus alertas y sus productos con el nivel de alerta de cada uno |
 | PATCH | `/admin/users/{id}/status` | Habilitar/deshabilitar (`is_active`) |
 
 ### Productos
 
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
-| GET | `/admin/products/` | Listar productos (filtros `search`, `categoria`, `user_id`, `only_with_image`, `vencido`, `bajo_stock`; orden `sort_by` / `sort_dir`; páginas `limit` / `offset`) |
+| GET | `/admin/products/` | Listar productos (filtros `search`, `categoria`, `user_id`, `only_with_image`, `vencido`, `bajo_stock`, `alert_level`; orden `sort_by` / `sort_dir`; páginas `limit` / `offset`). Cada producto trae `alert_level` y `alert_types`, con las reglas de su dueño |
 | GET | `/admin/products/export` | Exportar a CSV o Excel, con los mismos filtros y el mismo orden que el listado |
 | GET | `/admin/products/filters/options` | Categorías y dueños disponibles para los filtros |
 | GET | `/admin/products/groups` | Buscar por nombre los productos agrupados, con su stock total |
@@ -77,6 +86,36 @@ Puerto: **8002**.
 - `GET /admin/products/groups?q=` devuelve hasta 10 grupos cuyo nombre contiene `q`, con `stock_total`, `lotes`, `usuarios` y `proximo_vencimiento`.
 - `GET /admin/products/group?nombre=&categoria=` devuelve el detalle con todos los productos del grupo, ordenados por vencimiento (los que no vencen, al final), cada uno con su dueño. Responde `404` si no existe.
 - Los dos aceptan `user_id`. **Con `user_id` se cuenta solo lo de ese usuario; sin él, lo de todos los usuarios de la plataforma**, que es lo que permite ver el stock total de un producto en toda la plataforma.
+
+### Reglas y alertas (iguales a las de la app)
+
+El backoffice calcula las alertas con **las mismas reglas que `app_backend`** (`app/core/alert_rules.py` y `app/core/alerts_view.py`), pero en su propio código: el panel sigue siendo un servicio separado.
+
+- **Vencimiento**: se avisa cuando faltan **menos de** N días (o ya venció). **Stock mínimo**: se avisa cuando, al ritmo de consumo del modelo predictivo, el stock alcanza para **menos de** N días. En los dos casos manda la regla del producto y, si no tiene, la del perfil (7 días por defecto).
+- **Nivel**: *crítica* si ya se llegó al límite, *advertencia* si se está cerca (hasta la mitad del límite más allá, con un mínimo de 2 días) y sin alerta si está lejos. El nivel se calcula **al leer**, con la fecha de hoy y la regla vigente, así un cambio de regla se ve enseguida.
+- Las de **vencimiento** se calculan acá con los productos; las del **modelo predictivo** (`stock_low_coverage`, `slow_pace`) las guarda `app_backend` en la tabla `alerts` y acá se leen (su nivel también sale de la regla de hoy). Son las que llevan la marca «Predicción».
+- Al cambiar una regla del perfil, o al cargar, editar o dar salida a un producto, el backoffice le pide a `app_backend` que vuelva a evaluar las alertas del usuario **sin mandar avisos** (`POST /internal/alerts/run/{user_id}?notify=false`). Es de mejor esfuerzo: si el servicio no responde, el cambio queda guardado igual.
+
+### Hora argentina
+
+Los eventos se guardan en UTC, pero **el día de cada movimiento, el «hoy» de los gráficos y de las alertas, y la hora del chequeo diario son los de Argentina (UTC-3)** (`app/core/argentina.py`). La hora del chequeo se guarda en UTC en la base (las 05:00 argentinas son las 8) y el perfil la muestra en hora argentina.
+
+### Endpoints del usuario (`/me/*`, piden token de usuario)
+
+| Método | Endpoint | Descripción |
+|--------|----------|-------------|
+| GET | `/me/stats` | Productos, unidades en stock, productos con una alerta crítica de vencimiento y de stock, vencidos, alertas críticas y advertencias |
+| GET | `/me/alerts/` | Centro de alertas: filtros `tipo` (`stock` / `vencimiento`) y `level`; el resumen cuenta lo del tipo pedido, no lo del nivel |
+| GET | `/me/alerts/summary` | Cuántas alertas hay por nivel |
+| GET | `/me/changes?limit=&offset=` | «Últimos cambios»: entradas, salidas y modificaciones con el stock antes y después (se reconstruye hacia atrás desde el stock actual) |
+| GET | `/me/metrics?period=` | Tendencias: consumo por día (días argentinos), totales y los **5** productos más consumidos (los lotes de un mismo nombre cuentan como uno); sin «menos usados» |
+| GET | `/me/profile`, PUT | Perfil con los límites de la app: nombre, apellido y usuario hasta 20 caracteres, días de las alertas de 2 a 90, hora del chequeo de 0 a 23 (Argentina), tipo de cuenta |
+| GET | `/me/profile/username-available?username=` | Si el nombre de usuario se puede usar; guardarlo repetido es un `409` (no distingue mayúsculas) |
+| POST | `/me/products/image` | Sube la **imagen de un producto como archivo** (`multipart`, JPG/PNG/WebP de hasta `MAX_IMAGE_MB`) al servicio de almacenamiento con el token del usuario y devuelve `{ "url": ... }` |
+| GET | `/me/products/match?q=` | Productos del usuario parecidos a un texto leído de una etiqueta: compara nombre, marca y descripción |
+| GET | `/me/products/groups?q=`, `/me/products/group` | Stock total de «el mismo producto» entre los lotes del usuario |
+
+El **código de barras** acepta 8, 12, 13 o 14 dígitos y **no exige el dígito verificador**, igual que la app; un UPC-A se guarda como EAN-13.
 
 ### Módulo de OCR
 
@@ -160,6 +199,10 @@ ALLOWED_ORIGINS_STR=http://localhost:3000,http://localhost:5173
 # contenedor; corriendo a mano en la máquina, `http://localhost:8003`.
 OCR_SERVICE_URL=http://tpp_ocr:8003
 OCR_TIMEOUT_SECONDS=300
+
+# Servicio de almacenamiento de imágenes: las fotos de producto se suben como archivo
+IMAGE_STORAGE_URL=http://tpp_storage_service:8000
+MAX_IMAGE_MB=10
 
 DEBUG=True
 HOST=0.0.0.0

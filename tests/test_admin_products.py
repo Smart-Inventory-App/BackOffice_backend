@@ -3,7 +3,7 @@ Panel de administración: listado, filtros, exportación y borrado de productos
 de cualquier usuario.
 """
 import uuid
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,7 +13,7 @@ from app.core.security import get_current_admin
 from app.main import app
 from app.models.app_models import Alert, AuthUser, Product
 from app.models.audit import AdminActivityLog
-from tests.conftest import create_admin, create_product
+from tests.conftest import create_admin, create_product, create_stock_alert
 
 
 @pytest.fixture()
@@ -66,7 +66,8 @@ def test_list_products_filtra_por_busqueda_categoria_y_dueno(admin_client, db_se
 def test_list_products_filtra_por_imagen_vencido_y_bajo_stock(admin_client, db_session, auth_user):
     create_product(db_session, auth_user, nombre="Con foto", imagen_url="http://x/1.jpg")
     create_product(db_session, auth_user, nombre="Vencido", vencimiento=date(2020, 1, 1))
-    create_product(db_session, auth_user, nombre="Poco stock", stock=1)
+    poco = create_product(db_session, auth_user, nombre="Poco stock", stock=1)
+    create_stock_alert(db_session, auth_user, poco, days_until_stockout=2)
 
     data = admin_client.get("/admin/products/", params={"only_with_image": True}).json()
     assert [p["nombre"] for p in data["items"]] == ["Con foto"]
@@ -79,6 +80,24 @@ def test_list_products_filtra_por_imagen_vencido_y_bajo_stock(admin_client, db_s
 
     data = admin_client.get("/admin/products/", params={"bajo_stock": True}).json()
     assert [p["nombre"] for p in data["items"]] == ["Poco stock"]
+    assert data["items"][0]["alert_level"] == "critical"
+    assert data["items"][0]["alert_types"] == ["stock_low_coverage"]
+
+
+def test_list_products_filtra_por_nivel_de_alerta(admin_client, db_session, auth_user):
+    from app.core.argentina import ar_today
+
+    create_product(db_session, auth_user, nombre="Crítico", stock=3, vencimiento=ar_today() + timedelta(days=2))
+    create_product(db_session, auth_user, nombre="Cerca", stock=3, vencimiento=ar_today() + timedelta(days=9))
+    create_product(db_session, auth_user, nombre="Lejos", stock=3, vencimiento=ar_today() + timedelta(days=60))
+
+    critical = admin_client.get("/admin/products/", params={"alert_level": "critical"}).json()["items"]
+    warning = admin_client.get("/admin/products/", params={"alert_level": "warning"}).json()["items"]
+
+    assert [p["nombre"] for p in critical] == ["Crítico"]
+    assert [p["nombre"] for p in warning] == ["Cerca"]
+    export = admin_client.get("/admin/products/export", params={"alert_level": "warning"}).content.decode("utf-8-sig")
+    assert "Cerca" in export and "Crítico" not in export
 
 
 def test_list_products_se_puede_ordenar(admin_client, db_session, auth_user):
