@@ -3,10 +3,12 @@ from datetime import datetime, time, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
-from sqlalchemy import func
+from sqlalchemy import String, cast, func
 from sqlalchemy.orm import Session
 
 from app.api.auth import _auth_request
+from app.api.me import build_stock_changes
+from app.api.metrics import build_metrics
 from app.core.database import get_db
 from app.core.security import get_current_admin
 from app.models.admin import AdminUser
@@ -19,7 +21,9 @@ from app.schemas.platform import (
     AppUserDetail,
     AppUserResponse,
     AuditEntry,
+    MyMetrics,
     PaginatedUsers,
+    StockChangeOut,
     ProductOwner,
     UserStatusUpdate,
 )
@@ -64,7 +68,10 @@ def list_users(
 
     query = db.query(AuthUser)
     if search:
-        query = query.filter(AuthUser.email.ilike(f"%{search}%"))
+        # Se busca por mail o por nombre de usuario
+        term = f"%{search}%"
+        usernames = db.query(UserProfile.user_id).filter(UserProfile.username.ilike(term))
+        query = query.filter(AuthUser.email.ilike(term) | cast(AuthUser.id, String).in_(usernames))
     if status_filter == "active":
         query = query.filter(AuthUser.is_active.is_(True))
     elif status_filter == "inactive":
@@ -100,6 +107,36 @@ def list_users(
             )
         )
     return PaginatedUsers(items=result, total=total)
+
+
+def _existing_user(user_id: str, db: Session) -> AuthUser:
+    user = db.query(AuthUser).filter(AuthUser.id == _user_uuid(user_id)).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
+    return user
+
+
+@router.get("/{user_id}/metrics", response_model=MyMetrics)
+def user_metrics(
+    user_id: str,
+    period: int = Query(30, ge=1, le=365),
+    db: Session = Depends(get_db),
+    _: AdminUser = Depends(get_current_admin),
+):
+    """Las tendencias de consumo e ingresos de un usuario, las mismas que ve él en su dashboard."""
+    return build_metrics(db, period, str(_existing_user(user_id, db).id))
+
+
+@router.get("/{user_id}/changes", response_model=list[StockChangeOut])
+def user_changes(
+    user_id: str,
+    limit: int = Query(5, ge=1, le=50),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    _: AdminUser = Depends(get_current_admin),
+):
+    """Los cambios de stock de un usuario, del más nuevo al más viejo (como «Últimos cambios» de su dashboard)."""
+    return build_stock_changes(db, str(_existing_user(user_id, db).id), limit, offset)
 
 
 @router.get("/{user_id}", response_model=AppUserDetail)

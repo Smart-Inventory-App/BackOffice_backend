@@ -648,20 +648,13 @@ def _is_correction_companion(event, by_id: dict) -> bool:
     return previous is not None and previous.reverses_event_id is not None and _correction_companion(previous, by_id) is event
 
 
-@router.get("/changes", response_model=list[StockChangeOut])
-def my_stock_changes(
-    limit: int = Query(5, ge=1, le=50),
-    offset: int = Query(0, ge=0),
-    db: Session = Depends(get_db),
-    current: AuthUser = Depends(get_current_user),
-):
+def build_stock_changes(db: Session, uid: str, limit: int, offset: int) -> list[StockChangeOut]:
     """Los últimos cambios de stock del usuario, del más nuevo al más viejo (como «Últimos cambios» de la app).
 
     Incluye las entradas, las salidas y las modificaciones hechas al editar un producto. Cada cambio trae el stock antes
     y después, que se reconstruye hacia atrás desde el stock actual con los movimientos del producto. Las correcciones no
     aparecen: queda el movimiento corregido. `offset` salta los más nuevos para pedir las páginas siguientes.
     """
-    uid = str(current.id)
     products = {p.id: p for p in db.query(Product).filter(Product.user_id == uid).all()}
     events = (
         db.query(ConsumptionEvent)
@@ -725,6 +718,17 @@ def my_stock_changes(
 
     changes.sort(key=lambda item: item[0], reverse=True)
     return [change for _, change in changes[offset:offset + limit]]
+
+
+@router.get("/changes", response_model=list[StockChangeOut])
+def my_stock_changes(
+    limit: int = Query(5, ge=1, le=50),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """Los últimos cambios de stock del usuario (ver `build_stock_changes`)."""
+    return build_stock_changes(db, str(current.id), limit, offset)
 
 
 @router.get("/products/by-barcode/{codigo}", response_model=Optional[ProductSuggestion])
