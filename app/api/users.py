@@ -80,6 +80,7 @@ def list_users(
         query = query.filter(AuthUser.email.in_(admin_emails))
 
     total = query.count()
+    enabled = query.filter(AuthUser.is_active.is_(True)).count()
     users = (
         query.order_by(AuthUser.created_at.desc().nullslast())
         .offset(offset)
@@ -106,7 +107,7 @@ def list_users(
                 product_count=counts.get(uid, 0),
             )
         )
-    return PaginatedUsers(items=result, total=total)
+    return PaginatedUsers(items=result, total=total, enabled=enabled)
 
 
 def _existing_user(user_id: str, db: Session) -> AuthUser:

@@ -104,6 +104,8 @@ class AppUserDetail(AppUserResponse):
 class PaginatedUsers(BaseModel):
     items: List[AppUserResponse]
     total: int
+    # Cuántos de los usuarios de la lista (con la búsqueda y el filtro elegidos) tienen la cuenta habilitada
+    enabled: int = 0
 
 
 class PaginatedProducts(BaseModel):

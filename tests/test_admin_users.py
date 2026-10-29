@@ -72,6 +72,22 @@ def test_list_users_incluye_el_conteo_de_productos_y_el_perfil(admin_client, db_
     assert item["username"] == "gian"
 
 
+def test_list_users_cuenta_cuantos_estan_habilitados_segun_la_busqueda_y_el_filtro(admin_client, db_session, auth_user):
+    from app.models.app_models import AuthUser
+
+    db_session.add(AuthUser(email="baja@x.com", hashed_password="x", is_active=False))
+    db_session.add(AuthUser(email="otra-baja@x.com", hashed_password="x", is_active=False))
+    db_session.commit()
+
+    todos = admin_client.get("/admin/users/").json()
+    solo_bajas = admin_client.get("/admin/users/", params={"status_filter": "inactive"}).json()
+    buscado = admin_client.get("/admin/users/", params={"search": "baja"}).json()
+
+    assert (todos["total"], todos["enabled"]) == (3, 1)
+    assert (solo_bajas["total"], solo_bajas["enabled"]) == (2, 0)
+    assert (buscado["total"], buscado["enabled"]) == (2, 0)
+
+
 def test_list_users_busca_por_mail_o_por_nombre_de_usuario(admin_client, db_session, auth_user):
     db_session.add(UserProfile(user_id=str(auth_user.id), username="gianluuba"))
     db_session.commit()
