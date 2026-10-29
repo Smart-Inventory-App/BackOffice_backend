@@ -82,6 +82,59 @@ def test_activity_se_puede_filtrar_por_tipo(admin_client, db_session, auth_user)
     assert data["total"] == 1
 
 
+def test_activity_se_puede_filtrar_por_usuario_en_todos_los_tipos_de_evento(admin_client, db_session, auth_user):
+    from app.models.app_models import AuthUser, ConsumptionEvent
+
+    otro = AuthUser(email="otro@x.com", hashed_password="x", is_active=True)
+    db_session.add(otro)
+    db_session.commit()
+    mio, suyo = str(auth_user.id), str(otro.id)
+    producto = create_product(db_session, auth_user, nombre="Leche")
+    db_session.add(UserStatusAudit(user_id=mio, changed_by="jefe@x.com", is_active=False))
+    db_session.add(UserStatusAudit(user_id=suyo, changed_by="jefe@x.com", is_active=False))
+    db_session.add(AdminRoleAudit(user_id=mio, changed_by="jefe@x.com", action="granted"))
+    db_session.add(AdminRoleAudit(user_id=suyo, changed_by="jefe@x.com", action="granted"))
+    for uid, email in ((mio, auth_user.email), (suyo, "otro@x.com")):
+        db_session.add(AdminActivityLog(
+            event_type="login", actor_email=email, target_user_id=uid, target_email=email, description=f"{email} inició sesión",
+        ))
+    db_session.add(ConsumptionEvent(product_id=producto.id, user_id=mio, quantity=1, event_type="consumed"))
+    db_session.add(ConsumptionEvent(product_id=producto.id, user_id=suyo, quantity=1, event_type="consumed"))
+    db_session.commit()
+
+    todos = admin_client.get("/admin/activity/", params={"limit": 200}).json()
+    solo_mio = admin_client.get("/admin/activity/", params={"user_id": mio, "limit": 200}).json()
+    solo_suyo_salidas = admin_client.get("/admin/activity/", params={"user_id": suyo, "kind": "product_exit"}).json()
+
+    assert todos["total"] > solo_mio["total"]
+    assert {e["kind"] for e in solo_mio["items"]} >= {"status", "role", "login", "product_exit", "registered"}
+    assert all(e["target_user_id"] == mio for e in solo_mio["items"])
+    assert solo_suyo_salidas["total"] == 1 and solo_suyo_salidas["items"][0]["target_user_id"] == suyo
+
+
+def test_activity_filtra_por_usuario_tambien_los_productos_y_los_eventos_del_log(admin_client, db_session, auth_user):
+    uid = str(auth_user.id)
+    db_session.add(AdminActivityLog(
+        event_type="product_created", actor_email=auth_user.email, target_user_id=uid, target_email=auth_user.email, description="cargó",
+    ))
+    db_session.commit()
+
+    assert admin_client.get("/admin/activity/", params={"user_id": uid, "kind": "product_created"}).json()["total"] == 1
+    assert admin_client.get("/admin/activity/", params={"user_id": "no-existe", "kind": "product_created"}).json()["total"] == 0
+
+
+def test_activity_ofrece_los_usuarios_para_filtrar_ordenados_por_mail(admin_client, db_session, auth_user):
+    from app.models.app_models import AuthUser
+
+    db_session.add(AuthUser(email="a@x.com", hashed_password="x", is_active=True))
+    db_session.commit()
+
+    usuarios = admin_client.get("/admin/activity/filters/options").json()["users"]
+
+    assert [u["email"] for u in usuarios] == ["a@x.com", auth_user.email]
+    assert usuarios[1]["user_id"] == str(auth_user.id)
+
+
 def test_activity_incluye_cada_salida_de_producto_sin_las_entradas_ni_las_correcciones(admin_client, db_session, auth_user):
     from app.models.app_models import ConsumptionEvent
 

@@ -51,9 +51,23 @@ def _sync_registrations(db: Session) -> None:
         db.commit()
 
 
+@router.get("/filters/options")
+def filter_options(
+    db: Session = Depends(get_db),
+    _: AdminUser = Depends(get_current_admin),
+):
+    """Los usuarios por los que se puede filtrar la auditoría, ordenados por mail."""
+    users = sorted(
+        ({"user_id": str(u.id), "email": u.email} for u in db.query(AuthUser.id, AuthUser.email).all()),
+        key=lambda u: (u["email"] or u["user_id"]).lower(),
+    )
+    return {"users": users}
+
+
 @router.get("/", response_model=PaginatedActivity)
 def list_activity(
     kind: Optional[str] = Query(None, pattern=ACTIVITY_KINDS),
+    user_id: Optional[str] = Query(None),
     limit: int = Query(30, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -64,7 +78,10 @@ def list_activity(
     entries: list[ActivityEntry] = []
 
     if kind in (None, "status"):
-        for e in db.query(UserStatusAudit).all():
+        status_query = db.query(UserStatusAudit)
+        if user_id:
+            status_query = status_query.filter(UserStatusAudit.user_id == user_id)
+        for e in status_query.all():
             target_email = emails.get(e.user_id)
             desc = f"{target_email or e.user_id} fue {'habilitado' if e.is_active else 'deshabilitado'}"
             if e.reason:
@@ -82,7 +99,10 @@ def list_activity(
             )
 
     if kind in (None, "role"):
-        for e in db.query(AdminRoleAudit).all():
+        role_query = db.query(AdminRoleAudit)
+        if user_id:
+            role_query = role_query.filter(AdminRoleAudit.user_id == user_id)
+        for e in role_query.all():
             target_email = emails.get(e.user_id)
             verb = "recibió" if e.action == "granted" else "perdió"
             entries.append(
@@ -107,6 +127,7 @@ def list_activity(
                 ConsumptionEvent.event_type != "restocked",
                 ConsumptionEvent.reverses_event_id.is_(None),
                 ConsumptionEvent.id.notin_(reversed_ids),
+                *([ConsumptionEvent.user_id == user_id] if user_id else []),
             )
             .all()
         )
@@ -135,6 +156,8 @@ def list_activity(
             query = query.filter(AdminActivityLog.event_type.in_(("product_created", "product_updated")))
         elif kind:
             query = query.filter(AdminActivityLog.event_type == kind)
+        if user_id:
+            query = query.filter(AdminActivityLog.target_user_id == user_id)
         for e in query.all():
             event_kind = "product_created" if e.event_type == "product_updated" and _LOADED_STOCK.search(e.description) else e.event_type
             if kind and event_kind != kind:
