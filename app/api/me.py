@@ -842,7 +842,7 @@ def create_my_product(
         db.refresh(existing)
         _log_consumption(db, existing.id, uid, data.stock, "restocked", actor_email=current.email)
         _log_activity(
-            db, "product_updated", current.email, uid, current.email,
+            db, "product_created", current.email, uid, current.email,
             f"{current.email} sumó {data.stock} unidades a \"{existing.nombre}\" (stock: {existing.stock}) desde el dashboard",
         )
         return MyProductResponse.model_validate(existing, from_attributes=True).model_copy(update={"merged": True})
@@ -1000,7 +1000,7 @@ def restock_my_product(
     _log_consumption(db, product.id, uid, data.quantity, "restocked", actor_email=current.email)
     background_tasks.add_task(refresh_user_alerts, uid)
     _log_activity(
-        db, "product_updated", current.email, uid, current.email,
+        db, "product_created", current.email, uid, current.email,
         f"{current.email} ingresó {data.quantity} unidades a \"{product.nombre}\" (stock: {product.stock}) desde el dashboard",
     )
     return product
@@ -1512,7 +1512,7 @@ def bulk_commit(
             if existing:
                 _log_consumption(db, existing.id, uid, row.stock, "restocked", actor_email=current.email, note=body.origen)
             _log_activity(
-                db, "product_created" if kind_log == "cargó" else "product_updated",
+                db, "product_created",
                 current.email, uid, current.email,
                 f"{current.email} {kind_log} \"{nombre_log}\" (stock: {stock_log}) por {body.origen.lower()}",
             )

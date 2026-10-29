@@ -987,3 +987,13 @@ def test_los_archivos_exportados_se_llaman_productos(client, db_session, auth_us
 
     assert csv_resp.headers["content-disposition"] == 'attachment; filename="productos.csv"'
     assert xlsx_resp.headers["content-disposition"] == 'attachment; filename="productos.xlsx"'
+
+
+def test_una_carga_de_stock_a_un_producto_existente_se_audita_como_entrada(client, db_session, auth_user):
+    product = create_product(db_session, auth_user, stock=2)
+
+    resp = client.post(f"/me/products/{product.id}/restock", json={"quantity": 30})
+
+    assert resp.status_code == 201
+    logs = db_session.query(AdminActivityLog).filter(AdminActivityLog.description.like("%ingresó 30 unidades%")).all()
+    assert [log.event_type for log in logs] == ["product_created"]

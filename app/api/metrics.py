@@ -14,7 +14,7 @@ from app.schemas.platform import ConsumoPorDia, MyMetrics, ProductoConsumo
 
 router = APIRouter(tags=["metrics"])
 
-# Cuántos productos trae el ranking de los más consumidos: 5 en el de un usuario y 10 en el de toda la plataforma
+# Cuántos productos trae el ranking de los que tuvieron más salidas: 5 en el de un usuario y 10 en el de toda la plataforma
 TOP_PRODUCTS = 5
 TOP_PRODUCTS_PLATFORM = 10
 
@@ -83,11 +83,13 @@ def build_metrics(db: Session, period: int, user_id: Optional[str] = None) -> My
     per_day: dict[str, int] = {}
     per_product: dict[int, int] = {}
     for e in events:
+        # El ranking cuenta las salidas de todo tipo (consumo, venta, alquiler, vencimiento...), no solo el consumo
+        if e.event_type != "restocked":
+            per_product[e.product_id] = per_product.get(e.product_id, 0) + e.quantity
         if e.event_type not in CONSUMPTION_EVENT_TYPES:
             continue
         day = ar_day(e.consumed_at).isoformat()
         per_day[day] = per_day.get(day, 0) + e.quantity
-        per_product[e.product_id] = per_product.get(e.product_id, 0) + e.quantity
 
     consumo_por_dia = []
     for i in range(period - 1, -1, -1):

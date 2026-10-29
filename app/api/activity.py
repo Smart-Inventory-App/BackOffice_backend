@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from typing import Optional
 
@@ -14,6 +15,10 @@ from app.schemas.platform import ActivityEntry, PaginatedActivity
 router = APIRouter(prefix="/admin/activity", tags=["admin-activity"])
 
 ACTIVITY_KINDS = "^(status|role|login|registered|product_created|product_exit|product_updated|product_deleted)$"
+
+# Las cargas de stock a un producto que ya existía ("ingresó N unidades a…", "sumó N unidades a…") siempre fueron
+# entradas; las que se guardaron antes como ediciones se reconocen por su texto
+_LOADED_STOCK = re.compile(r" (ingresó|sumó) \d+ unidad(?:es)? a ")
 
 EXIT_REASONS = {"consumed": "consumido", "sold": "vendido", "rented": "alquilado", "expired": "vencido"}
 
@@ -126,13 +131,18 @@ def list_activity(
     activity_log_kinds = ("login", "registered", "product_created", "product_updated", "product_deleted")
     if kind in (None,) + activity_log_kinds:
         query = db.query(AdminActivityLog)
-        if kind:
+        if kind in ("product_created", "product_updated"):
+            query = query.filter(AdminActivityLog.event_type.in_(("product_created", "product_updated")))
+        elif kind:
             query = query.filter(AdminActivityLog.event_type == kind)
         for e in query.all():
+            event_kind = "product_created" if e.event_type == "product_updated" and _LOADED_STOCK.search(e.description) else e.event_type
+            if kind and event_kind != kind:
+                continue
             entries.append(
                 ActivityEntry(
                     id=f"activity-{e.id}",
-                    kind=e.event_type,
+                    kind=event_kind,
                     actor_email=e.actor_email,
                     target_user_id=e.target_user_id,
                     target_email=e.target_email,

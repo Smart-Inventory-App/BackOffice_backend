@@ -49,7 +49,8 @@ def test_metrics_counts_sales_and_rentals_as_consumption(client, db_session, aut
 
     assert data["total_consumido"] == 5
     assert sum(d["quantity"] for d in data["consumo_por_dia"]) == 5
-    assert data["top_productos"][0]["cantidad"] == 5
+    # el ranking cuenta las salidas de todo tipo, también los vencidos
+    assert data["top_productos"][0]["cantidad"] == 9
 
 
 def test_a_sale_or_a_rental_lowers_the_stock_and_keeps_its_type(client, db_session, auth_user):

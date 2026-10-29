@@ -162,6 +162,26 @@ def test_activity_incluye_cada_salida_de_producto_sin_las_entradas_ni_las_correc
     assert any(e["kind"] == "product_exit" for e in admin_client.get("/admin/activity/").json()["items"])
 
 
+def test_las_cargas_de_stock_a_un_producto_existente_son_entradas_tambien_las_guardadas_como_edicion(admin_client, db_session, auth_user):
+    uid = str(auth_user.id)
+    for kind, text in (
+        ("product_updated", f'{auth_user.email} ingresó 30 unidades a "Pan Lactal" (stock: 32) desde el dashboard'),
+        ("product_updated", f'{auth_user.email} sumó 1 unidad a "Pan" (stock: 3) por Ticket'),
+        ("product_updated", f'{auth_user.email} editó "Pan" (nombre) desde el dashboard'),
+        ("product_created", f'{auth_user.email} cargó "Pan" (stock: 2) desde el dashboard'),
+    ):
+        db_session.add(AdminActivityLog(event_type=kind, actor_email=auth_user.email, target_user_id=uid, target_email=auth_user.email, description=text))
+    db_session.commit()
+
+    entradas = admin_client.get("/admin/activity/", params={"kind": "product_created"}).json()
+    ediciones = admin_client.get("/admin/activity/", params={"kind": "product_updated"}).json()
+
+    assert entradas["total"] == 3 and all(e["kind"] == "product_created" for e in entradas["items"])
+    assert [e["description"] for e in ediciones["items"]] == [f'{auth_user.email} editó "Pan" (nombre) desde el dashboard']
+    todos = admin_client.get("/admin/activity/").json()["items"]
+    assert sum(1 for e in todos if e["kind"] == "product_created") == 3
+
+
 def test_activity_respeta_paginacion(admin_client, db_session, auth_user):
     for i in range(3):
         db_session.add(AdminActivityLog(
