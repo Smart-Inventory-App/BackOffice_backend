@@ -1194,13 +1194,13 @@ def delete_consumption_event(
 
 def _coerce_stock(raw) -> tuple[Optional[int], Optional[str]]:
     if raw is None or str(raw).strip() == "":
-        return None, "stock es obligatorio"
+        return None, "El stock debe ser mayor a 0"
     try:
         value = int(float(str(raw).strip()))
     except ValueError:
         return None, "stock debe ser un número entero"
     if value <= 0:
-        return None, "stock debe ser mayor a 0"
+        return None, "El stock debe ser mayor a 0"
     return value, None
 
 
@@ -1244,7 +1244,7 @@ def _validate_row(raw: dict, row_number: int, mode: str = "entrada") -> BulkPars
 
     nombre = _clean_str(raw.get("nombre"))
     if not nombre:
-        errors.append("nombre es obligatorio")
+        errors.append("El nombre del producto es obligatorio")
     elif len(nombre) > MAX_NOMBRE:
         errors.append(f"nombre supera los {MAX_NOMBRE} caracteres")
 
@@ -1443,9 +1443,9 @@ def _validar_fila(row: BulkProductRow, mode: str) -> None:
     descontar o dejaría un producto en negativo al cargar.
     """
     if row.stock <= 0:
-        raise ValueError("stock debe ser mayor a 0")
+        raise ValueError("El stock debe ser mayor a 0")
     if not row.nombre.strip():
-        raise ValueError("nombre es obligatorio")
+        raise ValueError("El nombre del producto es obligatorio")
     if len(row.nombre) > MAX_NOMBRE:
         raise ValueError(f"nombre supera los {MAX_NOMBRE} caracteres")
     if mode == "entrada":

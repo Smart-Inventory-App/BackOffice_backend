@@ -329,7 +329,7 @@ def test_bulk_parse_nombre_obligatorio(client):
     filas = _parse(client, "nombre,categoria,stock\n,Farmacia,3\n")
 
     assert filas[0]["valid"] is False
-    assert "nombre es obligatorio" in filas[0]["errors"]
+    assert "El nombre del producto es obligatorio" in filas[0]["errors"]
 
 
 def test_bulk_parse_categoria_obligatoria_solo_en_modo_entrada(client):
@@ -343,10 +343,10 @@ def test_bulk_parse_categoria_obligatoria_solo_en_modo_entrada(client):
 @pytest.mark.parametrize(
     "stock, mensaje",
     [
-        ("", "stock es obligatorio"),
+        ("", "El stock debe ser mayor a 0"),
         ("no-es-numero", "stock debe ser un número entero"),
-        ("0", "stock debe ser mayor a 0"),
-        ("-5", "stock debe ser mayor a 0"),
+        ("0", "El stock debe ser mayor a 0"),
+        ("-5", "El stock debe ser mayor a 0"),
     ],
 )
 def test_bulk_parse_valida_el_stock(client, stock, mensaje):
