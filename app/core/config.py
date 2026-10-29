@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     AUTH_SERVICE_URL: str = "http://localhost:8001"
     APP_BACKEND_URL: str = "http://localhost:8000"
     ML_SERVICE_URL: str = "http://localhost:8003"
+    # Almacenamiento de imágenes: las fotos de producto se suben como archivo y acá se guarda solo la dirección que devuelve
+    IMAGE_STORAGE_URL: str = "http://localhost:8004"
+    # Tamaño máximo de la imagen de un producto, el mismo que acepta el servicio de almacenamiento
+    MAX_IMAGE_MB: int = 10
     INTERNAL_SERVICE_TOKEN: str
 
     # Coordinador del módulo de OCR (los motores viven detrás de él). El timeout

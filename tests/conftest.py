@@ -21,7 +21,15 @@ from app.core.database import Base, get_db
 from app.core.security import get_current_user
 from app.main import app
 from app.models.admin import AdminUser
-from app.models.app_models import AuthUser, Product
+from app.models.app_models import Alert, AuthUser, Product
+
+
+@pytest.fixture(autouse=True)
+def no_app_backend(monkeypatch):
+    """Los tests no le hablan al app_backend: se anotan los pedidos de actualizar alertas para poder verificarlos."""
+    calls = []
+    monkeypatch.setattr("app.api.me.refresh_user_alerts", lambda user_id: calls.append(user_id))
+    return calls
 
 
 @pytest.fixture(scope="session")
@@ -98,6 +106,16 @@ def create_product(db_session, auth_user, **overrides):
     db_session.commit()
     db_session.refresh(product)
     return product
+
+
+def create_stock_alert(db_session, auth_user, product, days_until_stockout=2, **extra):
+    """Una alerta del modelo predictivo, como las que guarda `app_backend`: el stock alcanza para esos días."""
+    fields = dict(type="stock_low_coverage", level="critical", days_until_stockout=days_until_stockout)
+    fields.update(extra)
+    alert = Alert(user_id=auth_user.id, product_id=product.id, **fields)
+    db_session.add(alert)
+    db_session.commit()
+    return alert
 
 
 @pytest.fixture()

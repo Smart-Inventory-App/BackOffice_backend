@@ -11,6 +11,7 @@ services:
       OCR_SERVICE_URL: http://tpp_ocr:8003
       AUTH_SERVICE_URL: http://tpp_auth:8000
       APP_BACKEND_URL: http://tpp_backend:8000
+      IMAGE_STORAGE_URL: http://tpp_storage_service:8000
     networks:
       - tpp-net
     restart: unless-stopped

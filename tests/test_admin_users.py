@@ -72,6 +72,35 @@ def test_list_users_incluye_el_conteo_de_productos_y_el_perfil(admin_client, db_
     assert item["username"] == "gian"
 
 
+def test_list_users_cuenta_cuantos_estan_habilitados_segun_la_busqueda_y_el_filtro(admin_client, db_session, auth_user):
+    from app.models.app_models import AuthUser
+
+    db_session.add(AuthUser(email="baja@x.com", hashed_password="x", is_active=False))
+    db_session.add(AuthUser(email="otra-baja@x.com", hashed_password="x", is_active=False))
+    db_session.commit()
+
+    todos = admin_client.get("/admin/users/").json()
+    solo_bajas = admin_client.get("/admin/users/", params={"status_filter": "inactive"}).json()
+    buscado = admin_client.get("/admin/users/", params={"search": "baja"}).json()
+
+    assert (todos["total"], todos["enabled"]) == (3, 1)
+    assert (solo_bajas["total"], solo_bajas["enabled"]) == (2, 0)
+    assert (buscado["total"], buscado["enabled"]) == (2, 0)
+
+
+def test_list_users_busca_por_mail_o_por_nombre_de_usuario(admin_client, db_session, auth_user):
+    db_session.add(UserProfile(user_id=str(auth_user.id), username="gianluuba"))
+    db_session.commit()
+
+    por_usuario = admin_client.get("/admin/users/", params={"search": "GIANLU"}).json()
+    por_mail = admin_client.get("/admin/users/", params={"search": auth_user.email[:5]}).json()
+    ninguno = admin_client.get("/admin/users/", params={"search": "zzzz-nadie"}).json()
+
+    assert auth_user.email in [u["email"] for u in por_usuario["items"]]
+    assert auth_user.email in [u["email"] for u in por_mail["items"]]
+    assert ninguno["total"] == 0
+
+
 # ── detalle ──────────────────────────────────────────────────────────────────
 
 def test_get_user_devuelve_sus_productos(admin_client, db_session, auth_user):
@@ -317,3 +346,34 @@ def test_grant_admin_con_el_servicio_auth_caido_da_503_sin_auditar(admin_client,
 
     assert resp.status_code == 503
     assert db_session.query(AdminRoleAudit).count() == 0
+
+
+# ── tendencias y cambios de un usuario ───────────────────────────────────────
+
+def test_las_tendencias_de_un_usuario_son_las_de_su_dashboard(admin_client, client, db_session, auth_user):
+    product = create_product(db_session, auth_user, stock=10)
+    client.post("/me/products/salida", json={"product_id": product.id, "quantity": 3, "event_type": "consumed"})
+
+    data = admin_client.get(f"/admin/users/{auth_user.id}/metrics", params={"period": 7}).json()
+
+    assert data["period_days"] == 7 and len(data["consumo_por_dia"]) == 7
+    assert data["total_consumido"] == 3
+
+
+def test_los_cambios_de_un_usuario_salen_del_mas_nuevo_al_mas_viejo_y_se_paginan(admin_client, client, db_session, auth_user):
+    product = create_product(db_session, auth_user, stock=10)
+    client.post("/me/products/salida", json={"product_id": product.id, "quantity": 3, "event_type": "consumed"})
+    client.post(f"/me/products/{product.id}/restock", json={"quantity": 5})
+
+    todos = admin_client.get(f"/admin/users/{auth_user.id}/changes", params={"limit": 10}).json()
+    primero = admin_client.get(f"/admin/users/{auth_user.id}/changes", params={"limit": 1}).json()
+    segundo = admin_client.get(f"/admin/users/{auth_user.id}/changes", params={"limit": 1, "offset": 1}).json()
+
+    assert [c["kind"] for c in todos] == ["entrada", "salida", "entrada"]
+    assert primero == todos[:1] and segundo == todos[1:2]
+    assert todos[0]["stock_before"] == 7 and todos[0]["stock_after"] == 12
+
+
+def test_tendencias_y_cambios_de_un_usuario_inexistente_son_404(admin_client):
+    assert admin_client.get("/admin/users/no-es-un-uuid/metrics").status_code == 404
+    assert admin_client.get("/admin/users/00000000-0000-0000-0000-000000000000/changes").status_code == 404

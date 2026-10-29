@@ -1,23 +1,29 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, time, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
-from sqlalchemy import func
+from sqlalchemy import String, cast, func
 from sqlalchemy.orm import Session
 
 from app.api.auth import _auth_request
+from app.api.me import build_stock_changes
+from app.api.metrics import build_metrics
 from app.core.database import get_db
 from app.core.security import get_current_admin
 from app.models.admin import AdminUser
-from app.models.app_models import AuthUser, Product, UserProfile
+from app.core import alerts_view
+from app.core.argentina import AR_TZ, ar_today
+from app.models.app_models import CONSUMPTION_EVENT_TYPES, AuthUser, ConsumptionEvent, Product, UserProfile
 from app.models.audit import AdminRoleAudit, UserStatusAudit
 from app.schemas.platform import (
     AdminProductResponse,
     AppUserDetail,
     AppUserResponse,
     AuditEntry,
+    MyMetrics,
     PaginatedUsers,
+    StockChangeOut,
     ProductOwner,
     UserStatusUpdate,
 )
@@ -62,7 +68,10 @@ def list_users(
 
     query = db.query(AuthUser)
     if search:
-        query = query.filter(AuthUser.email.ilike(f"%{search}%"))
+        # Se busca por mail o por nombre de usuario
+        term = f"%{search}%"
+        usernames = db.query(UserProfile.user_id).filter(UserProfile.username.ilike(term))
+        query = query.filter(AuthUser.email.ilike(term) | cast(AuthUser.id, String).in_(usernames))
     if status_filter == "active":
         query = query.filter(AuthUser.is_active.is_(True))
     elif status_filter == "inactive":
@@ -71,6 +80,7 @@ def list_users(
         query = query.filter(AuthUser.email.in_(admin_emails))
 
     total = query.count()
+    enabled = query.filter(AuthUser.is_active.is_(True)).count()
     users = (
         query.order_by(AuthUser.created_at.desc().nullslast())
         .offset(offset)
@@ -97,7 +107,37 @@ def list_users(
                 product_count=counts.get(uid, 0),
             )
         )
-    return PaginatedUsers(items=result, total=total)
+    return PaginatedUsers(items=result, total=total, enabled=enabled)
+
+
+def _existing_user(user_id: str, db: Session) -> AuthUser:
+    user = db.query(AuthUser).filter(AuthUser.id == _user_uuid(user_id)).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
+    return user
+
+
+@router.get("/{user_id}/metrics", response_model=MyMetrics)
+def user_metrics(
+    user_id: str,
+    period: int = Query(30, ge=1, le=365),
+    db: Session = Depends(get_db),
+    _: AdminUser = Depends(get_current_admin),
+):
+    """Las tendencias de consumo e ingresos de un usuario, las mismas que ve él en su dashboard."""
+    return build_metrics(db, period, str(_existing_user(user_id, db).id))
+
+
+@router.get("/{user_id}/changes", response_model=list[StockChangeOut])
+def user_changes(
+    user_id: str,
+    limit: int = Query(5, ge=1, le=50),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    _: AdminUser = Depends(get_current_admin),
+):
+    """Los cambios de stock de un usuario, del más nuevo al más viejo (como «Últimos cambios» de su dashboard)."""
+    return build_stock_changes(db, str(_existing_user(user_id, db).id), limit, offset)
 
 
 @router.get("/{user_id}", response_model=AppUserDetail)
@@ -113,6 +153,24 @@ def get_user(
     uid = str(user.id)
     prof = db.query(UserProfile).filter(UserProfile.user_id == uid).first()
     products = db.query(Product).filter(Product.user_id == uid).order_by(Product.created_at.desc()).all()
+    alerts = alerts_view.alerts_for(db, uid)
+    summary = alerts_view.summarize(alerts)
+    levels = alerts_view.levels_by_product(db, [p.id for p in products])
+
+    # Consumo y reposición de los últimos 30 días contando hoy (días argentinos), sin las correcciones del historial
+    month_start = datetime.combine(ar_today() - timedelta(days=29), time.min, tzinfo=AR_TZ).astimezone(timezone.utc).replace(tzinfo=None)
+    reversed_ids = db.query(ConsumptionEvent.reverses_event_id).filter(ConsumptionEvent.reverses_event_id.isnot(None))
+    movements = (
+        db.query(ConsumptionEvent.event_type, func.coalesce(func.sum(ConsumptionEvent.quantity), 0))
+        .filter(
+            ConsumptionEvent.user_id == uid,
+            ConsumptionEvent.consumed_at >= month_start,
+            ConsumptionEvent.reverses_event_id.is_(None),
+            ConsumptionEvent.id.notin_(reversed_ids),
+        )
+        .group_by(ConsumptionEvent.event_type)
+        .all()
+    )
 
     return AppUserDetail(
         id=uid,
@@ -124,6 +182,12 @@ def get_user(
         first_name=prof.first_name if prof else None,
         last_name=prof.last_name if prof else None,
         product_count=len(products),
+        total_units=sum(p.stock for p in products),
+        critical_alerts=summary.critical,
+        warning_alerts=summary.warning,
+        consumed_last_30d=sum(int(qty) for kind, qty in movements if kind in CONSUMPTION_EVENT_TYPES),
+        restocked_last_30d=sum(int(qty) for kind, qty in movements if kind == "restocked"),
+        alerts=alerts,
         products=[
             AdminProductResponse(
                 id=p.id,
@@ -135,8 +199,13 @@ def get_user(
                 descripcion=p.descripcion,
                 imagen_url=p.imagen_url,
                 ubicacion=p.ubicacion,
+                codigo_barras=p.codigo_barras,
+                stock_minimo=p.stock_minimo,
+                dias_alerta_vencimiento=p.dias_alerta_vencimiento,
                 created_at=p.created_at,
-                owner=ProductOwner(user_id=uid, email=user.email),
+                alert_level=levels.get(p.id, (None, []))[0],
+                alert_types=levels.get(p.id, (None, []))[1],
+                owner=ProductOwner(user_id=uid, email=user.email, is_active=bool(user.is_active)),
             )
             for p in products
         ],

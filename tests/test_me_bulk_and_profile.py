@@ -10,6 +10,8 @@ tenían test propio.
 import io
 from datetime import date, datetime, timedelta
 
+from app.core.argentina import ar_today
+
 import pytest
 from openpyxl import Workbook
 from sqlalchemy.exc import SQLAlchemyError
@@ -17,7 +19,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.api import me as me_api
 from app.models.app_models import ConsumptionEvent, Product, UserProfile
 from app.models.audit import AdminActivityLog
-from tests.conftest import create_product
+from tests.conftest import create_product, create_stock_alert
 
 CSV_HEADER = "nombre,categoria,stock,codigo_barras,vencimiento,marca,ubicacion,descripcion,imagen_url,stock_minimo,dias_alerta_vencimiento\n"
 
@@ -40,8 +42,10 @@ def test_profile_se_crea_con_los_valores_por_defecto(client, db_session, auth_us
     data = client.get("/me/profile").json()
 
     assert data["email"] == auth_user.email
-    assert data["stock_minimo"] == 10
+    assert data["stock_minimo"] == 7
     assert data["dias_alerta_vencimiento"] == 7
+    assert data["alert_check_hour"] == 5
+    assert data["user_type"] == "individuo"
     assert db_session.query(UserProfile).filter(UserProfile.user_id == str(auth_user.id)).count() == 1
 
 
@@ -72,29 +76,37 @@ def test_profile_username_y_apellido_tambien_se_actualizan(client, db_session, a
 # ── stats ────────────────────────────────────────────────────────────────────
 
 def test_my_stats_cuenta_bajo_stock_y_por_vencer(client, db_session, auth_user):
-    create_product(db_session, auth_user, stock=1, categoria="Lácteos")  # bajo el default de 10
-    create_product(db_session, auth_user, stock=50, vencimiento=date.today(), categoria="Lácteos")
+    bajo = create_product(db_session, auth_user, stock=1, categoria="Lácteos")
+    create_stock_alert(db_session, auth_user, bajo, days_until_stockout=2)  # alcanza para menos que los 7 días del perfil
+    create_product(db_session, auth_user, stock=50, vencimiento=ar_today(), categoria="Lácteos")
     create_product(db_session, auth_user, stock=50, vencimiento=date(2020, 1, 1), categoria="Vieja")
     create_product(db_session, auth_user, stock=50, imagen_url="http://x/1.jpg", categoria="Lácteos")
 
     data = client.get("/me/stats").json()
 
     assert data["total_products"] == 4
+    assert data["total_units"] == 151
     assert data["products_with_image"] == 1
     assert data["low_stock_products"] == 1
-    assert data["expiring_soon_products"] == 1
+    # vence hoy y ya venció: las dos tienen una alerta crítica de vencimiento, como en el inicio de la app
+    assert data["expiring_soon_products"] == 2
     assert data["expired_products"] == 1
+    assert data["critical_alerts"] == 3
+    assert data["warning_alerts"] == 0
     labels = {c["label"] for c in data["products_by_category"]}
     assert "Lácteos" in labels
 
 
 def test_my_stats_respeta_el_umbral_propio_del_producto(client, db_session, auth_user):
-    create_product(db_session, auth_user, stock=5, stock_minimo=3)  # no está bajo con su propio umbral
-    create_product(db_session, auth_user, stock=2, stock_minimo=3)  # sí lo está
+    lejos = create_product(db_session, auth_user, stock=5, stock_minimo=3)
+    cerca = create_product(db_session, auth_user, stock=2, stock_minimo=3)
+    create_stock_alert(db_session, auth_user, lejos, days_until_stockout=3)  # con su límite de 3 días no es crítica
+    create_stock_alert(db_session, auth_user, cerca, days_until_stockout=2)  # alcanza para menos de 3 días
 
     data = client.get("/me/stats").json()
 
-    assert data["low_stock_products"] == 1
+    assert data["low_stock_products"] == 2  # los dos productos tienen alerta de stock: una crítica y una advertencia
+    assert data["warning_alerts"] == 1
 
 
 # ── listado ──────────────────────────────────────────────────────────────────
@@ -134,8 +146,10 @@ def test_my_products_se_puede_ordenar_por_cualquier_campo_sortable(client, db_se
 
 def test_my_products_bajo_stock_y_por_vencer_se_resuelven_en_python(client, db_session, auth_user):
     bajo = create_product(db_session, auth_user, nombre="Bajo", stock=1)
+    create_stock_alert(db_session, auth_user, bajo)
     create_product(db_session, auth_user, nombre="Normal", stock=99)
-    por_vencer = create_product(db_session, auth_user, nombre="PorVencer", vencimiento=date.today(), stock=99)
+    por_vencer = create_product(db_session, auth_user, nombre="PorVencer", vencimiento=ar_today(), stock=99)
+    create_product(db_session, auth_user, nombre="Vencido", vencimiento=date(2020, 1, 1), stock=99)  # ya venció: no es «por vencer»
 
     data = client.get("/me/products", params={"bajo_stock": True}).json()
     assert [p["id"] for p in data["items"]] == [bajo.id]
@@ -146,8 +160,9 @@ def test_my_products_bajo_stock_y_por_vencer_se_resuelven_en_python(client, db_s
 
 @pytest.mark.parametrize("campo", ["nombre", "stock", "vencimiento", "categoria", None])
 def test_my_products_bajo_stock_se_puede_ordenar(client, db_session, auth_user, campo):
-    create_product(db_session, auth_user, nombre="B", stock=1, categoria="B", vencimiento=date(2027, 1, 1))
-    create_product(db_session, auth_user, nombre="A", stock=1, categoria="A", vencimiento=date(2026, 1, 1))
+    for nombre, vencimiento in (("B", date(2027, 1, 1)), ("A", date(2026, 1, 1))):
+        producto = create_product(db_session, auth_user, nombre=nombre, stock=1, categoria=nombre, vencimiento=vencimiento)
+        create_stock_alert(db_session, auth_user, producto)
 
     params = {"bajo_stock": True, "sort_dir": "desc"}
     if campo:
@@ -193,7 +208,7 @@ def test_export_my_products_con_vencido_y_orden(client, db_session, auth_user):
 
 
 def test_export_my_products_con_bajo_stock(client, db_session, auth_user):
-    create_product(db_session, auth_user, nombre="Bajo", stock=1)
+    create_stock_alert(db_session, auth_user, create_product(db_session, auth_user, nombre="Bajo", stock=1))
     create_product(db_session, auth_user, nombre="Alto", stock=99)
 
     resp = client.get("/me/products/export", params={"format": "csv", "bajo_stock": True})
@@ -314,7 +329,7 @@ def test_bulk_parse_nombre_obligatorio(client):
     filas = _parse(client, "nombre,categoria,stock\n,Farmacia,3\n")
 
     assert filas[0]["valid"] is False
-    assert "nombre es obligatorio" in filas[0]["errors"]
+    assert "El nombre del producto es obligatorio" in filas[0]["errors"]
 
 
 def test_bulk_parse_categoria_obligatoria_solo_en_modo_entrada(client):
@@ -328,10 +343,10 @@ def test_bulk_parse_categoria_obligatoria_solo_en_modo_entrada(client):
 @pytest.mark.parametrize(
     "stock, mensaje",
     [
-        ("", "stock es obligatorio"),
+        ("", "El stock debe ser mayor a 0"),
         ("no-es-numero", "stock debe ser un número entero"),
-        ("0", "stock debe ser mayor a 0"),
-        ("-5", "stock debe ser mayor a 0"),
+        ("0", "El stock debe ser mayor a 0"),
+        ("-5", "El stock debe ser mayor a 0"),
     ],
 )
 def test_bulk_parse_valida_el_stock(client, stock, mensaje):
@@ -660,11 +675,325 @@ def test_my_products_las_paginas_no_repiten_productos(client, db_session, auth_u
 
 
 def test_my_products_con_bajo_stock_tambien_ordena_alfabeticamente_y_sin_los_que_no_vencen(client, db_session, auth_user):
-    create_product(db_session, auth_user, nombre="banana", stock=1, vencimiento=date(2027, 2, 1))
-    create_product(db_session, auth_user, nombre="Álvaro", stock=1, vencimiento=date(2027, 1, 1))
-    create_product(db_session, auth_user, nombre="Sin fecha", stock=1)
+    for nombre, vencimiento in (("banana", date(2027, 2, 1)), ("Álvaro", date(2027, 1, 1)), ("Sin fecha", None)):
+        create_stock_alert(db_session, auth_user, create_product(db_session, auth_user, nombre=nombre, stock=1, vencimiento=vencimiento))
 
     assert mis_nombres(client, bajo_stock=True, sort_by="nombre") == ["Álvaro", "banana", "Sin fecha"]
     data = client.get("/me/products", params={"bajo_stock": True, "sort_by": "vencimiento"}).json()
     assert [p["nombre"] for p in data["items"]] == ["Álvaro", "banana"]
     assert data["total"] == 2
+
+
+# ── ubicación y stock total del inventario ───────────────────────────────────
+
+def test_my_products_filtra_por_ubicacion_sin_distinguir_mayusculas(client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="Leche", ubicacion="Heladera")
+    create_product(db_session, auth_user, nombre="Arroz", ubicacion="Alacena")
+
+    data = client.get("/me/products", params={"ubicacion": "heladera"}).json()
+
+    assert [p["nombre"] for p in data["items"]] == ["Leche"]
+
+
+def test_el_export_tambien_filtra_por_ubicacion(client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="Leche", ubicacion="Heladera")
+    create_product(db_session, auth_user, nombre="Arroz", ubicacion="Alacena")
+
+    body = client.get("/me/products/export", params={"ubicacion": "Alacena"}).text
+
+    assert "Arroz" in body and "Leche" not in body
+
+
+def test_el_stock_total_suma_los_productos_de_la_lista_con_sus_filtros(client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="Leche", categoria="Lácteos", ubicacion="Heladera", stock=4)
+    create_product(db_session, auth_user, nombre="Yogur", categoria="Lácteos", ubicacion="Alacena", stock=6)
+    create_product(db_session, auth_user, nombre="Arroz", categoria="Almacén", ubicacion="Alacena", stock=10, vencimiento=date(2020, 1, 1))
+    create_product(db_session, auth_user, nombre="Ajeno", stock=99, user_id="otro-usuario")
+
+    assert client.get("/me/products/stock-total").json() == {"stock_total": 20, "products": 3}
+    assert client.get("/me/products/stock-total", params={"categoria": "lácteos"}).json() == {"stock_total": 10, "products": 2}
+    assert client.get("/me/products/stock-total", params={"ubicacion": "alacena", "search": "yog"}).json() == {"stock_total": 6, "products": 1}
+    assert client.get("/me/products/stock-total", params={"vencido": True}).json() == {"stock_total": 10, "products": 1}
+
+
+def test_el_stock_total_respeta_el_filtro_de_alertas(client, db_session, auth_user, monkeypatch):
+    keep = create_product(db_session, auth_user, nombre="Se acaba", stock=2)
+    create_product(db_session, auth_user, nombre="Sobra", stock=50)
+    monkeypatch.setattr(me_api, "_alert_filter_ids", lambda db, uid, bajo_stock, por_vencer: {keep.id})
+
+    assert client.get("/me/products/stock-total", params={"bajo_stock": True}).json() == {"stock_total": 2, "products": 1}
+
+
+def test_el_inventario_se_filtra_por_marca_tambien_en_export_y_stock_total(client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="Leche", marca="La Serenísima", stock=4)
+    create_product(db_session, auth_user, nombre="Yogur", marca="La Serenísima", stock=6)
+    create_product(db_session, auth_user, nombre="Arroz", marca="Gallo", stock=10)
+
+    data = client.get("/me/products", params={"marca": "la serenísima"}).json()
+    body = client.get("/me/products/export", params={"marca": "Gallo"}).text
+
+    assert sorted(p["nombre"] for p in data["items"]) == ["Leche", "Yogur"]
+    assert "Arroz" in body and "Leche" not in body
+    assert client.get("/me/products/stock-total", params={"marca": "Gallo"}).json() == {"stock_total": 10, "products": 1}
+
+
+def test_las_estadisticas_traen_el_stock_por_marca_y_dejan_afuera_lo_que_no_tiene_marca_ni_ubicacion(client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="Leche", marca="La Serenísima", stock=4, ubicacion="Heladera")
+    create_product(db_session, auth_user, nombre="Yogur", marca="La Serenísima", stock=6, ubicacion="Heladera")
+    create_product(db_session, auth_user, nombre="Arroz", marca="Gallo", stock=11, ubicacion="  ")
+    create_product(db_session, auth_user, nombre="Sal", marca=None, stock=50, ubicacion=None)
+    create_product(db_session, auth_user, nombre="Pan", marca="   ", stock=70, ubicacion=None)
+
+    stats = client.get("/me/stats").json()
+
+    assert [(b["label"], b["count"]) for b in stats["stock_by_brand"]] == [("Gallo", 11), ("La Serenísima", 10)]
+    assert [(c["label"], c["count"]) for c in stats["products_by_location"]] == [("Heladera", 2)]
+
+
+def test_el_usuario_elimina_un_producto_propio_con_sus_alertas_y_movimientos(client, db_session, auth_user):
+    from app.models.app_models import Alert, ConsumptionEvent, Product
+
+    product = create_product(db_session, auth_user, nombre="Leche", stock=3)
+    other = create_product(db_session, auth_user, nombre="Arroz", stock=3)
+    db_session.add(Alert(user_id=auth_user.id, product_id=product.id, type="stock_low", level="warning"))
+    db_session.add(ConsumptionEvent(product_id=product.id, user_id=str(auth_user.id), quantity=1, event_type="consumed"))
+    db_session.commit()
+    product_id = product.id
+
+    response = client.delete(f"/me/products/{product_id}")
+
+    assert response.status_code == 204
+    db_session.expire_all()
+    assert db_session.query(Product).filter(Product.id == product_id).first() is None
+    assert db_session.query(Alert).filter(Alert.product_id == product_id).count() == 0
+    assert db_session.query(Product).filter(Product.id == other.id).first() is not None
+
+
+def test_no_se_elimina_un_producto_ajeno_ni_inexistente(client, db_session, auth_user):
+    from app.models.app_models import Product
+
+    ajeno = create_product(db_session, auth_user, nombre="Ajeno", stock=1, user_id="otro-usuario")
+
+    assert client.delete(f"/me/products/{ajeno.id}").status_code == 404
+    assert client.delete("/me/products/999999").status_code == 404
+    assert db_session.query(Product).filter(Product.id == ajeno.id).first() is not None
+
+
+def test_el_usuario_elimina_varios_productos_en_lote_y_solo_los_propios(client, db_session, auth_user):
+    from app.models.app_models import Product
+
+    a = create_product(db_session, auth_user, nombre="Leche", stock=3)
+    b = create_product(db_session, auth_user, nombre="Yogur", stock=3)
+    c = create_product(db_session, auth_user, nombre="Arroz", stock=3)
+    d = create_product(db_session, auth_user, nombre="Sal", stock=3)
+    e = create_product(db_session, auth_user, nombre="Pan", stock=3)
+    ajeno = create_product(db_session, auth_user, nombre="Ajeno", stock=1, user_id="otro-usuario")
+    ids = [a.id, b.id, c.id, d.id, e.id, ajeno.id]
+    ajeno_id = ajeno.id
+
+    response = client.post("/me/products/bulk-delete", json={"product_ids": ids})
+
+    assert response.status_code == 200
+    assert response.json() == {"deleted": 5}
+    db_session.expire_all()
+    assert [p.nombre for p in db_session.query(Product).all()] == ["Ajeno"]
+    assert db_session.query(Product).first().id == ajeno_id
+
+
+def test_el_borrado_en_lote_pide_productos_y_que_existan(client, db_session, auth_user):
+    ajeno = create_product(db_session, auth_user, nombre="Ajeno", stock=1, user_id="otro-usuario")
+
+    assert client.post("/me/products/bulk-delete", json={"product_ids": []}).status_code == 400
+    assert client.post("/me/products/bulk-delete", json={"product_ids": [ajeno.id, 999999]}).status_code == 404
+
+
+# ── exportación e importación con las mismas columnas ─────────────────────────
+
+EXPORT_COLUMNS = [
+    "nombre", "stock", "categoria", "marca", "vencimiento", "codigo_barras",
+    "descripcion", "ubicacion", "dias_stock_minimo", "dias_alerta_vencimiento",
+]
+
+
+def _export_csv_rows(client, **params):
+    import csv as csv_module
+    import io as io_module
+
+    text = client.get("/me/products/export", params={"format": "csv", **params}).content.decode("utf-8-sig")
+    return list(csv_module.reader(io_module.StringIO(text)))
+
+
+def test_la_exportacion_trae_las_columnas_de_la_carga_en_ese_orden_y_vacio_lo_que_no_existe(client, db_session, auth_user):
+    create_product(
+        db_session, auth_user, nombre="Leche", stock=4, categoria="Lácteos", marca="Ser", vencimiento=date(2027, 3, 5),
+        codigo_barras="7791234567890", descripcion="Entera", ubicacion="Heladera", stock_minimo=3, dias_alerta_vencimiento=9,
+    )
+    create_product(db_session, auth_user, nombre="Sal", stock=1, categoria="Almacén", marca=None, vencimiento=None)
+
+    rows = _export_csv_rows(client, sort_by="nombre")
+
+    assert rows[0] == EXPORT_COLUMNS
+    assert rows[1] == ["Leche", "4", "Lácteos", "Ser", "2027-03-05", "7791234567890", "Entera", "Heladera", "3", "9"]
+    assert rows[2] == ["Sal", "1", "Almacén", "", "", "", "", "", "", ""]
+    assert "id" not in rows[0] and "imagen_url" not in rows[0]
+
+
+def test_la_exportacion_en_excel_tiene_las_mismas_columnas(client, db_session, auth_user):
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    create_product(db_session, auth_user, nombre="Leche", stock=4, categoria="Lácteos", stock_minimo=3)
+
+    content = client.get("/me/products/export", params={"format": "xlsx"}).content
+    sheet = load_workbook(BytesIO(content)).active
+
+    assert [cell.value for cell in sheet[1]] == EXPORT_COLUMNS
+    assert sheet[2][0].value == "Leche" and sheet[2][8].value == 3
+
+
+def test_un_archivo_exportado_se_puede_volver_a_subir_y_trae_lo_mismo(client, db_session, auth_user):
+    create_product(
+        db_session, auth_user, nombre="Leche", stock=4, categoria="Lácteos", marca="Ser", vencimiento=date(2027, 3, 5),
+        codigo_barras="7791234567890", descripcion="Entera", ubicacion="Heladera", stock_minimo=3, dias_alerta_vencimiento=9,
+    )
+    texto = client.get("/me/products/export", params={"format": "csv"}).content.decode("utf-8-sig")
+
+    filas = _parse(client, texto)
+
+    assert filas[0]["valid"] is True
+    assert filas[0]["data"] | {"row_number": 2} == filas[0]["data"]
+    data = filas[0]["data"]
+    assert (data["nombre"], data["stock"], data["categoria"], data["marca"]) == ("Leche", 4, "Lácteos", "Ser")
+    assert (data["vencimiento"], data["codigo_barras"], data["descripcion"], data["ubicacion"]) == ("2027-03-05", "7791234567890", "Entera", "Heladera")
+    assert (data["stock_minimo"], data["dias_alerta_vencimiento"]) == (3, 9)
+
+
+def test_la_carga_acepta_las_columnas_en_cualquier_orden_y_sin_las_opcionales(client):
+    filas = _parse(
+        client,
+        "dias_alerta_vencimiento,ubicacion,categoria,nombre,stock,marca\n5,Heladera,Lácteos,Leche,2,Ser\n"
+        "7,,Almacén,Sal,1,\n",
+    )
+
+    assert [f["valid"] for f in filas] == [True, True]
+    leche = filas[0]["data"]
+    assert (leche["nombre"], leche["stock"], leche["categoria"], leche["marca"], leche["ubicacion"], leche["dias_alerta_vencimiento"]) == ("Leche", 2, "Lácteos", "Ser", "Heladera", 5)
+    # Lo que el archivo no trae queda vacío
+    assert (leche["vencimiento"], leche["codigo_barras"], leche["descripcion"], leche["stock_minimo"]) == (None, None, None, None)
+    assert filas[1]["data"]["marca"] is None and filas[1]["data"]["ubicacion"] is None
+
+
+def test_con_solo_las_tres_columnas_obligatorias_alcanza(client):
+    filas = _parse(client, "stock,nombre,categoria\n3,Leche,Lácteos\n")
+
+    assert filas[0]["valid"] is True
+    assert filas[0]["data"]["marca"] is None and filas[0]["data"]["dias_alerta_vencimiento"] is None
+
+
+@pytest.mark.parametrize(
+    "encabezado, faltan",
+    [
+        ("nombre,stock\nLeche,2\n", "categoria"),
+        ("stock,categoria\n2,Lácteos\n", "nombre"),
+        ("nombre,categoria,marca\nLeche,Lácteos,Ser\n", "stock"),
+        ("marca,descripcion\nSer,Entera\n", "nombre, stock, categoria"),
+    ],
+)
+def test_si_falta_una_columna_obligatoria_se_rechaza_el_archivo_diciendo_cuales(client, encabezado, faltan):
+    resp = client.post("/me/products/bulk/parse", files={"file": _csv_file(encabezado)})
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == f"Al archivo le faltan columnas obligatorias: {faltan}"
+
+
+def test_las_columnas_se_reconocen_sin_importar_mayusculas_acentos_ni_espacios(client):
+    filas = _parse(client, " Nombre ,STOCK,Categoría,Código de barras,Descripción\nLeche,2,Lácteos,7791234567890,Entera\n")
+
+    assert filas[0]["valid"] is True
+    assert filas[0]["data"]["categoria"] == "Lácteos"
+    assert filas[0]["data"]["descripcion"] == "Entera"
+
+
+def test_dias_stock_minimo_se_carga_y_stock_minimo_de_los_archivos_viejos_tambien(client):
+    nuevo = _parse(client, "nombre,stock,categoria,dias_stock_minimo\nLeche,2,Lácteos,6\n")
+    viejo = _parse(client, "nombre,stock,categoria,stock_minimo\nLeche,2,Lácteos,4\n")
+    invalido = _parse(client, "nombre,stock,categoria,dias_stock_minimo\nLeche,2,Lácteos,abc\n")
+
+    assert nuevo[0]["data"]["stock_minimo"] == 6
+    assert viejo[0]["data"]["stock_minimo"] == 4
+    assert any("dias_stock_minimo debe ser un número entero" in e for e in invalido[0]["errors"])
+
+
+def test_la_columna_imagen_url_ya_no_es_parte_del_archivo_y_se_ignora(client):
+    filas = _parse(client, "nombre,stock,categoria,imagen_url\nLeche,2,Lácteos,http://x/1.jpg\n")
+
+    assert filas[0]["valid"] is True
+    assert filas[0]["data"]["imagen_url"] is None
+
+
+def test_en_una_salida_alcanza_con_nombre_y_stock(client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="Leche", stock=5, marca=None)
+
+    filas = _parse(client, "stock,nombre\n2,Leche\n", mode="salida")
+    sin_stock = client.post("/me/products/bulk/parse", params={"mode": "salida"}, files={"file": _csv_file("nombre,marca\nLeche,Ser\n")})
+
+    assert filas[0]["valid"] is True and filas[0]["action"] == "salida"
+    assert sin_stock.status_code == 400
+    assert sin_stock.json()["detail"] == "Al archivo le faltan columnas obligatorias: stock"
+
+
+def test_un_excel_con_las_columnas_desordenadas_y_algunas_faltantes_se_lee_igual(client):
+    from io import BytesIO
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Categoría", "Stock", "Nombre", "Vencimiento"])
+    ws.append(["Lácteos", 3, "Leche", date(2027, 3, 5)])
+    buf = BytesIO()
+    wb.save(buf)
+
+    resp = client.post("/me/products/bulk/parse", files={"file": ("productos.xlsx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
+
+    fila = resp.json()["rows"][0]
+    assert resp.status_code == 200 and fila["valid"] is True
+    assert fila["data"]["nombre"] == "Leche" and fila["data"]["vencimiento"] == "2027-03-05" and fila["data"]["marca"] is None
+
+
+def test_un_excel_sin_una_columna_obligatoria_se_rechaza(client):
+    from io import BytesIO
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Nombre", "Categoría"])
+    ws.append(["Leche", "Lácteos"])
+    buf = BytesIO()
+    wb.save(buf)
+
+    resp = client.post("/me/products/bulk/parse", files={"file": ("productos.xlsx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
+
+    assert resp.status_code == 400
+    assert "stock" in resp.json()["detail"]
+
+def test_los_archivos_exportados_se_llaman_productos(client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="Leche")
+
+    csv_resp = client.get("/me/products/export", params={"format": "csv"})
+    xlsx_resp = client.get("/me/products/export", params={"format": "xlsx"})
+
+    assert csv_resp.headers["content-disposition"] == 'attachment; filename="productos.csv"'
+    assert xlsx_resp.headers["content-disposition"] == 'attachment; filename="productos.xlsx"'
+
+
+def test_una_carga_de_stock_a_un_producto_existente_se_audita_como_entrada(client, db_session, auth_user):
+    product = create_product(db_session, auth_user, stock=2)
+
+    resp = client.post(f"/me/products/{product.id}/restock", json={"quantity": 30})
+
+    assert resp.status_code == 201
+    logs = db_session.query(AdminActivityLog).filter(AdminActivityLog.description.like("%ingresó 30 unidades%")).all()
+    assert [log.event_type for log in logs] == ["product_created"]

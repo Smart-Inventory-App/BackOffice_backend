@@ -27,7 +27,9 @@ Puerto: **8002**.
 | `ocr_scan_audit` | **este servicio** | un renglón por ejecución del módulo de OCR; es lo único que queda de cada escaneo |
 | `auth_users` | servicio `auth` | listar/habilitar/deshabilitar usuarios de la app |
 | `products` | `app_backend` | visualizar/eliminar productos cargados por los usuarios |
-| `user_profiles` | `app_backend` | datos de perfil (nombre, usuario) |
+| `user_profiles` | `app_backend` | datos de perfil (nombre, usuario, reglas de alerta, hora del chequeo, tipo de cuenta) |
+| `alerts` | `app_backend` | se lee: las alertas del modelo predictivo (stock bajo por cobertura y ritmo lento) |
+| `consumption_events` | `app_backend` | se lee y se escribe: cada entrada y salida de stock (tendencias, «Últimos cambios») |
 
 > El backoffice **solo crea** sus propias tablas (`admin_users` y las de auditoría). Las demás ya las crean sus servicios dueños; acá solo se leen/gestionan filas.
 
@@ -42,28 +44,41 @@ Puerto: **8002**.
 | POST | `/admin/auth/login` | Login de admin → `access_token` |
 | GET | `/admin/auth/me` | Admin autenticado |
 | GET | `/admin/auth/admins` | Listar administradores |
-| POST | `/admin/auth/admins` | Crear un nuevo administrador |
+| POST | `/admin/auth/admins` | Agregar un administrador por su email. Con cuenta: la conserva. **Sin cuenta: `404` hasta que se manda `initial_password`**, con la que `auth` crea la cuenta; la persona la cambia en su primer ingreso (`must_change_password`). La respuesta trae `account_created` |
+| POST | `/admin/auth/change-password` | Cambia la contraseña de quien tiene la sesión iniciada (lo hace `auth` con el mismo token) |
 
-### Dashboard
+| POST | `/admin/auth/google` | **Ingreso y registro con Google**, igual que en la app: recibe el `id_token` que le dio Google a quien tocó «Continuar con Google» y se lo pasa a `auth` (`POST /auth/google`), que lo verifica, comprueba que lo emitió Google para nuestro cliente Web y crea la cuenta si es la primera vez. Devuelve el token de siempre. Un administrador dado de baja no entra; los errores salen con los mismos textos que en la app (token inválido, email sin verificar, Google inalcanzable, cuenta desactivada) |
+| POST | `/admin/auth/forgot-password` | Pide a `auth` un código por mail para recuperar (o crear, en una cuenta de Google) la contraseña |
+| POST | `/admin/auth/verify-code` | Verifica el código y devuelve el permiso para cambiar la contraseña |
+| POST | `/admin/auth/reset-password` | Guarda la contraseña nueva |
+
+`GET /admin/auth/me` devuelve `must_change_password`: el dashboard no deja usar nada hasta que se cambie la contraseña inicial. Su `full_name` es solo el **nombre y apellido del perfil** de la cuenta (igual para administradores y usuarios; `null` si no hay ninguno), no el nombre con el que se dio de alta al administrador.
+
+`POST /admin/auth/check` además devuelve `google_only`: la cuenta se creó con Google y todavía no tiene contraseña (el ingreso ofrece crear una desde «Olvidé mi contraseña»).
+
+### Dashboard y tendencias de la plataforma
 
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
-| GET | `/admin/stats/` | Métricas globales (usuarios, productos, vencimientos, categorías, etc.) |
+| GET | `/admin/stats/` | Usuarios, productos y unidades, alertas críticas y advertencias de toda la plataforma (con las reglas de cada usuario), usuarios con alertas, consumo y reposición de los últimos 7 días, categorías |
+| GET | `/admin/metrics?period=` | Tendencias de consumo e ingresos de toda la plataforma (mismo formato que `/me/metrics`) |
 
 ### Usuarios
 
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
 | GET | `/admin/users/` | Listar usuarios (filtros `search`, `status_filter`) |
-| GET | `/admin/users/{id}` | Detalle de usuario + sus productos |
+| GET | `/admin/users/{id}` | Detalle de usuario: unidades, alertas críticas y advertencias, consumo y reposición de los últimos 30 días, sus alertas y sus productos con el nivel de alerta de cada uno |
 | PATCH | `/admin/users/{id}/status` | Habilitar/deshabilitar (`is_active`) |
 
 ### Productos
 
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
-| GET | `/admin/products/` | Listar productos (filtros `search`, `categoria`, `user_id`, `only_with_image`, `vencido`, `bajo_stock`; orden `sort_by` / `sort_dir`; páginas `limit` / `offset`) |
+| GET | `/admin/products/` | Listar productos (filtros `search`, `categoria`, `user_id`, `only_with_image`, `vencido`, `bajo_stock`, `alert_level`; orden `sort_by` / `sort_dir`; páginas `limit` / `offset`). Cada producto trae `alert_level` y `alert_types`, con las reglas de su dueño |
 | GET | `/admin/products/export` | Exportar a CSV o Excel, con los mismos filtros y el mismo orden que el listado |
+
+**Columnas de los archivos (exportación y carga masiva).** La exportación de CSV y Excel —la del administrador y la del usuario— trae estas columnas y en este orden, con lo que un producto no tiene en vacío: `nombre`, `stock`, `categoria`, `marca`, `vencimiento` (`AAAA-MM-DD`), `codigo_barras`, `descripcion`, `ubicacion`, `dias_stock_minimo` y `dias_alerta_vencimiento` (el export del administrador suma `propietario` al final). La carga masiva del usuario (`POST /me/products/bulk/parse`) pide las mismas: en una **entrada** son obligatorias `nombre`, `stock` y `categoria`, y en una **salida** `nombre` y `stock`; las demás pueden ir en cualquier orden o faltar y quedan vacías. Los nombres de columna no distinguen mayúsculas, acentos ni espacios, y las columnas que no se conocen se ignoran. Si falta una obligatoria, el archivo se rechaza con un `400` que dice cuáles («Al archivo le faltan columnas obligatorias: stock»). Un archivo exportado se puede volver a subir. `stock_minimo` se sigue aceptando como nombre viejo de `dias_stock_minimo`.
 | GET | `/admin/products/filters/options` | Categorías y dueños disponibles para los filtros |
 | GET | `/admin/products/groups` | Buscar por nombre los productos agrupados, con su stock total |
 | GET | `/admin/products/group` | Todos los productos con un mismo nombre y categoría, y su stock total |
@@ -77,6 +92,42 @@ Puerto: **8002**.
 - `GET /admin/products/groups?q=` devuelve hasta 10 grupos cuyo nombre contiene `q`, con `stock_total`, `lotes`, `usuarios` y `proximo_vencimiento`.
 - `GET /admin/products/group?nombre=&categoria=` devuelve el detalle con todos los productos del grupo, ordenados por vencimiento (los que no vencen, al final), cada uno con su dueño. Responde `404` si no existe.
 - Los dos aceptan `user_id`. **Con `user_id` se cuenta solo lo de ese usuario; sin él, lo de todos los usuarios de la plataforma**, que es lo que permite ver el stock total de un producto en toda la plataforma.
+
+### Reglas y alertas (iguales a las de la app)
+
+El backoffice calcula las alertas con **las mismas reglas que `app_backend`** (`app/core/alert_rules.py` y `app/core/alerts_view.py`), pero en su propio código: el panel sigue siendo un servicio separado.
+
+- **Vencimiento**: se avisa cuando faltan **menos de** N días (o ya venció). **Stock mínimo**: se avisa cuando, al ritmo de consumo del modelo predictivo, el stock alcanza para **menos de** N días. En los dos casos manda la regla del producto y, si no tiene, la del perfil (7 días por defecto).
+- **Nivel**: *crítica* si ya se llegó al límite, *advertencia* si se está cerca (hasta la mitad del límite más allá, con un mínimo de 2 días) y sin alerta si está lejos. El nivel se calcula **al leer**, con la fecha de hoy y la regla vigente, así un cambio de regla se ve enseguida.
+- Las de **vencimiento** se calculan acá con los productos; las del **modelo predictivo** (`stock_low_coverage`, `slow_pace`) las guarda `app_backend` en la tabla `alerts` y acá se leen (su nivel también sale de la regla de hoy). Son las que llevan la marca «Predicción».
+- Al cambiar una regla del perfil, o al cargar, editar o dar salida a un producto, el backoffice le pide a `app_backend` que vuelva a evaluar las alertas del usuario **sin mandar avisos** (`POST /internal/alerts/run/{user_id}?notify=false`). Es de mejor esfuerzo: si el servicio no responde, el cambio queda guardado igual.
+
+### Hora argentina
+
+Los eventos se guardan en UTC, pero **el día de cada movimiento, el «hoy» de los gráficos y de las alertas, y la hora del chequeo diario son los de Argentina (UTC-3)** (`app/core/argentina.py`). La hora del chequeo se guarda en UTC en la base (las 05:00 argentinas son las 8) y el perfil la muestra en hora argentina.
+
+### Endpoints del usuario (`/me/*`, piden token de usuario)
+
+| Método | Endpoint | Descripción |
+|--------|----------|-------------|
+| GET | `/me/stats` | Productos, unidades en stock, productos con alertas de «Vencimiento» (vencimiento y ritmo lento) y de «Stock», de cualquier nivel y contando cada producto una sola vez (el mismo criterio que `/alerts/summary` de la app y que el inicio del celular), vencidos, alertas críticas y advertencias, y lo que dibujan los gráficos del dashboard: unidades por categoría, productos por ubicación y cuándo vencen (vencidos, 0 a 7, 8 a 30, 31 a 90 y más de 90 días, sin vencimiento) |
+| GET | `/me/alerts/` | Centro de alertas: filtros `tipo` (`stock` / `vencimiento`) y `level`; el resumen cuenta lo del tipo pedido, no lo del nivel |
+| GET | `/me/alerts/summary` | Cuántas alertas hay por nivel |
+| PUT/DELETE | `/me/products/{id}/events/{event_id}` | Corrige o deshace un registro del **Historial del Producto**: una entrada sigue siendo entrada y una salida sigue siendo salida (si no, 400); las notas automáticas dicen «Corrige el registro del 28/10/2026 15:29» / «Deshace el registro del ...», sin número |
+| GET | `/me/changes?limit=&offset=` | «Últimos cambios»: entradas, salidas y modificaciones con el stock antes y después (se reconstruye hacia atrás desde el stock actual). Editar o deshacer un registro del historial del producto deja una sola «modificación» con el efecto neto (20 → 35 sigue ahí y se suma 35 → 33) |
+| GET | `/me/products/stock-total` | `{stock_total, products}`: unidades y cantidad de productos de la lista, con la misma búsqueda y los mismos filtros que `/me/products` (el resumen del inventario) |
+| DELETE | `/me/products/{id}` | Elimina un producto propio (con sus alertas y movimientos) |
+| POST | `/me/products/bulk-delete` | `{product_ids}` → `{deleted}`: elimina varios productos propios |
+| GET | `/me/metrics?period=` | Tendencias: consumo por día (días argentinos), totales y los **5** productos más consumidos (los lotes de un mismo nombre cuentan como uno); sin «menos usados». Además **ingresos por día** (`ingresos_por_dia`, `total_ingresos`): reposiciones sin corregir más el stock con el que se cargaron los productos creados en el período |
+| GET | `/me/profile`, PUT | Perfil con los límites de la app: nombre, apellido y usuario hasta 20 caracteres, días de las alertas de 2 a 90, hora del chequeo de 0 a 23 (Argentina), tipo de cuenta |
+| GET | `/me/profile/username-available?username=` | Si el nombre de usuario se puede usar; guardarlo repetido es un `409` (no distingue mayúsculas) |
+| POST | `/me/products/image` | Sube la **imagen de un producto como archivo** (`multipart`, JPG/PNG/WebP de hasta `MAX_IMAGE_MB`) al servicio de almacenamiento con el token del usuario y devuelve `{ "url": ... }` |
+| GET | `/me/products/by-barcode/{codigo}/all` | Todos los productos del usuario con ese código de barras (por ejemplo, varios lotes), el que vence antes primero |
+| POST | `/me/products/{id}/restock` | `{quantity}`: suma stock a un producto ya cargado («Producto existente» del flujo de producto) y deja el movimiento |
+| GET | `/me/products/match?q=` | Productos del usuario parecidos a un texto leído de una etiqueta: compara nombre, marca y descripción |
+| GET | `/me/products/groups?q=`, `/me/products/group` | Stock total de «el mismo producto» entre los lotes del usuario |
+
+El **código de barras** acepta 8, 12, 13 o 14 dígitos y **no exige el dígito verificador**, igual que la app; un UPC-A se guarda como EAN-13.
 
 ### Módulo de OCR
 
@@ -160,6 +211,10 @@ ALLOWED_ORIGINS_STR=http://localhost:3000,http://localhost:5173
 # contenedor; corriendo a mano en la máquina, `http://localhost:8003`.
 OCR_SERVICE_URL=http://tpp_ocr:8003
 OCR_TIMEOUT_SECONDS=300
+
+# Servicio de almacenamiento de imágenes: las fotos de producto se suben como archivo
+IMAGE_STORAGE_URL=http://tpp_storage_service:8000
+MAX_IMAGE_MB=10
 
 DEBUG=True
 HOST=0.0.0.0

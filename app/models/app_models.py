@@ -21,6 +21,10 @@ class AuthUser(Base):
     email = Column(String, unique=True, nullable=False, index=True)
     hashed_password = Column(String, nullable=False)
     is_active = Column(Boolean, default=True)
+    # False en las cuentas creadas con Google que todavía no definieron una contraseña
+    has_password = Column(Boolean, default=True, nullable=False, server_default="true")
+    # True en una cuenta que un administrador creó con una contraseña inicial: en su primer ingreso tiene que cambiarla
+    must_change_password = Column(Boolean, default=False, nullable=False, server_default="false")
     created_at = Column(DateTime)
 
 
@@ -57,8 +61,12 @@ class UserProfile(Base):
     username = Column(String, nullable=True)
     last_categoria = Column(String, nullable=True)
     last_ubicacion = Column(String, nullable=True)
+    # Días de cobertura mínimos (stock mínimo) y días de anticipación del vencimiento, para todos sus productos
     stock_minimo = Column(Integer, nullable=True)
     dias_alerta_vencimiento = Column(Integer, nullable=True)
+    # Hora del chequeo diario de alertas, en UTC
+    alert_check_hour = Column(Integer, nullable=True)
+    user_type = Column(String, nullable=True)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
 
@@ -89,8 +97,8 @@ class ConsumptionEvent(Base):
 
 
 class Alert(Base):
-    """Owned by `app_backend` — table `alerts`. Se replica solo para poder borrar las alertas
-    de un producto antes de eliminarlo (la FK no tiene ON DELETE CASCADE)."""
+    """Owned by `app_backend` — table `alerts`. Se lee para mostrar las alertas del modelo predictivo y se usa para borrar
+    las de un producto antes de eliminarlo (la FK no tiene ON DELETE CASCADE)."""
 
     __tablename__ = "alerts"
 
@@ -101,7 +109,12 @@ class Alert(Base):
     level = Column(String(50), nullable=False)
     units_wasted = Column(Integer, nullable=True)
     days_until_stockout = Column(Integer, nullable=True)
+    suggested_qty = Column(Integer, nullable=True)
 
 
-DEFAULT_STOCK_MINIMO = 10
+# Días de cobertura mínimos por defecto (el stock mínimo se mide en días, como en la app)
+DEFAULT_STOCK_MINIMO = 7
 DEFAULT_DIAS_ALERTA_VENCIMIENTO = 7
+# Hora del chequeo diario por defecto, en UTC (las 5 de la mañana argentinas)
+DEFAULT_ALERT_CHECK_HOUR = 8
+DEFAULT_USER_TYPE = "individuo"
