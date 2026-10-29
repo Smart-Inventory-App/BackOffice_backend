@@ -1027,11 +1027,6 @@ def register_salida(
 
     _log_consumption(db, product.id, uid, data.quantity, data.event_type, actor_email=current.email, note=data.note)
     background_tasks.add_task(refresh_user_alerts, uid)
-    motivo = {"expired": "vencido", "sold": "vendido", "rented": "alquilado"}.get(data.event_type, "consumido")
-    _log_activity(
-        db, "product_updated", current.email, uid, current.email,
-        f"{current.email} sacó {data.quantity} unidades de \"{product.nombre}\" ({motivo}, stock: {product.stock}) desde el dashboard",
-    )
     return product
 
 
@@ -1482,10 +1477,6 @@ def bulk_commit(
                 db.commit()
                 _log_consumption(db, existing.id, uid, row.stock, "consumed", actor_email=current.email, note=body.origen)
                 merged += 1
-                _log_activity(
-                    db, "product_updated", current.email, uid, current.email,
-                    f"{current.email} sacó {row.stock} unidades de \"{existing.nombre}\" (stock: {existing.stock}) por {body.origen.lower()}",
-                )
                 continue
 
             existing = _find_matching_product(uid, row.nombre, row.marca, row.vencimiento, db)

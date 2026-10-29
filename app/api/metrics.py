@@ -14,8 +14,9 @@ from app.schemas.platform import ConsumoPorDia, MyMetrics, ProductoConsumo
 
 router = APIRouter(tags=["metrics"])
 
-# Cuántos productos trae el ranking de los más consumidos
+# Cuántos productos trae el ranking de los más consumidos: 5 en el de un usuario y 10 en el de toda la plataforma
 TOP_PRODUCTS = 5
+TOP_PRODUCTS_PLATFORM = 10
 
 
 def _ingresos(db: Session, since_start: datetime, user_id: Optional[str]) -> list[tuple[datetime, int]]:
@@ -94,11 +95,14 @@ def build_metrics(db: Session, period: int, user_id: Optional[str] = None) -> My
         consumo_por_dia.append(ConsumoPorDia(day=d, quantity=per_day.get(d, 0)))
 
     names = {}
+    owners = {}
     if per_product:
-        names = {
-            p.id: p.nombre
-            for p in db.query(Product.id, Product.nombre).filter(Product.id.in_(list(per_product))).all()
-        }
+        for p in db.query(Product.id, Product.nombre, Product.user_id).filter(Product.id.in_(list(per_product))).all():
+            names[p.id] = p.nombre
+            owners[p.id] = str(p.user_id)
+    emails = {}
+    if user_id is None and owners:
+        emails = {str(u.id): u.email for u in db.query(AuthUser.id, AuthUser.email).all()}
 
     per_day_in: dict[str, int] = {}
     for moment, quantity in ingresos:
@@ -109,16 +113,26 @@ def build_metrics(db: Session, period: int, user_id: Optional[str] = None) -> My
         d = (today - timedelta(days=i)).isoformat()
         ingresos_por_dia.append(ConsumoPorDia(day=d, quantity=per_day_in.get(d, 0)))
 
-    grouped: dict[str, dict] = {}
+    grouped: dict[tuple, dict] = {}
     for pid, qty in per_product.items():
         name = names.get(pid, f"Producto #{pid}")
-        entry = grouped.setdefault(" ".join(name.lower().split()), {"product_id": pid, "nombre": name, "best": qty, "cantidad": 0})
+        # En el ranking de la plataforma, cada usuario aparece por separado aunque tenga productos con el mismo nombre
+        key = (owners.get(pid) if user_id is None else "", " ".join(name.lower().split()))
+        entry = grouped.setdefault(key, {"product_id": pid, "nombre": name, "best": qty, "cantidad": 0})
         entry["cantidad"] += qty
         if qty > entry["best"]:
             entry.update(product_id=pid, nombre=name, best=qty)
 
     ranked = sorted(
-        (ProductoConsumo(product_id=e["product_id"], nombre=e["nombre"], cantidad=e["cantidad"]) for e in grouped.values()),
+        (
+            ProductoConsumo(
+                product_id=e["product_id"],
+                nombre=e["nombre"],
+                cantidad=e["cantidad"],
+                owner_email=emails.get(owners.get(e["product_id"])) if user_id is None else None,
+            )
+            for e in grouped.values()
+        ),
         key=lambda p: (-p.cantidad, p.nombre.lower()),
     )
 
@@ -127,7 +141,7 @@ def build_metrics(db: Session, period: int, user_id: Optional[str] = None) -> My
         total_consumido=total_consumido,
         total_entradas=total_entradas,
         consumo_por_dia=consumo_por_dia,
-        top_productos=ranked[:TOP_PRODUCTS],
+        top_productos=ranked[: TOP_PRODUCTS if user_id is not None else TOP_PRODUCTS_PLATFORM],
         total_ingresos=sum(per_day_in.values()),
         ingresos_por_dia=ingresos_por_dia,
     )

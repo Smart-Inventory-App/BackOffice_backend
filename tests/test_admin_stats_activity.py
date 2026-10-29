@@ -133,6 +133,35 @@ def test_activity_se_puede_filtrar_por_tipo(admin_client, db_session, auth_user)
     assert data["total"] == 1
 
 
+def test_activity_incluye_cada_salida_de_producto_sin_las_entradas_ni_las_correcciones(admin_client, db_session, auth_user):
+    from app.models.app_models import ConsumptionEvent
+
+    product = create_product(db_session, auth_user, nombre="Yerba", stock=10)
+    uid = str(auth_user.id)
+    for quantity, event_type in ((1, "consumed"), (3, "sold"), (2, "restocked")):
+        db_session.add(ConsumptionEvent(product_id=product.id, user_id=uid, quantity=quantity, event_type=event_type))
+    original = ConsumptionEvent(product_id=product.id, user_id=uid, quantity=5, event_type="consumed")
+    db_session.add(original)
+    db_session.commit()
+    # una corrección: el movimiento original y su reversa no cuentan, queda el corregido
+    db_session.add(ConsumptionEvent(product_id=product.id, user_id=uid, quantity=5, event_type="restocked", reverses_event_id=original.id))
+    db_session.add(ConsumptionEvent(product_id=product.id, user_id=uid, quantity=4, event_type="consumed"))
+    db_session.commit()
+
+    data = admin_client.get("/admin/activity/", params={"kind": "product_exit"}).json()
+
+    assert data["total"] == 3
+    assert all(e["kind"] == "product_exit" and e["target_email"] == auth_user.email for e in data["items"])
+    descriptions = sorted(e["description"] for e in data["items"])
+    assert descriptions == sorted([
+        f'{auth_user.email} sacó 1 unidad de "Yerba" (consumido)',
+        f'{auth_user.email} sacó 3 unidades de "Yerba" (vendido)',
+        f'{auth_user.email} sacó 4 unidades de "Yerba" (consumido)',
+    ])
+    # también aparecen en la lista completa
+    assert any(e["kind"] == "product_exit" for e in admin_client.get("/admin/activity/").json()["items"])
+
+
 def test_activity_respeta_paginacion(admin_client, db_session, auth_user):
     for i in range(3):
         db_session.add(AdminActivityLog(

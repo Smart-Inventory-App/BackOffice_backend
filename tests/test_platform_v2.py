@@ -47,7 +47,7 @@ def test_the_ranking_counts_the_lots_of_a_product_once_and_has_at_most_five(clie
     assert "productos_menos_usados" not in body
     names = [p["nombre"] for p in body["top_productos"]]
     assert len(names) == 5 and len(set(names)) == 5
-    assert body["top_productos"][0] == {"product_id": body["top_productos"][0]["product_id"], "nombre": "Leche Entera", "cantidad": 8}
+    assert body["top_productos"][0] == {"product_id": body["top_productos"][0]["product_id"], "nombre": "Leche Entera", "cantidad": 8, "owner_email": None}
 
 
 def test_the_ranking_keeps_the_lot_that_was_consumed_the_most_and_orders_ties_by_name(client, db_session, auth_user):
@@ -77,6 +77,23 @@ def test_the_platform_metrics_add_up_every_user_and_are_only_for_admins(admin_cl
     assert body["period_days"] == 7 and len(body["consumo_por_dia"]) == 7
     assert body["consumo_por_dia"][-1] == {"day": ar_today().isoformat(), "quantity": 7}
     assert body["top_productos"][0]["nombre"] == "A"
+
+
+def test_the_platform_ranking_has_ten_products_with_the_email_of_their_owner(admin_client, db_session, auth_user):
+    for i in range(12):
+        add_event(db_session, create_product(db_session, auth_user, nombre=f"P{i:02d}"), 20 - i)
+    # el mismo nombre en dos usuarios no se junta; el que no tiene cuenta queda sin mail
+    add_event(db_session, create_product(db_session, auth_user, nombre="Repetido"), 30)
+    add_event(db_session, create_product(db_session, auth_user, nombre="Repetido", user_id="otro-usuario"), 25)
+
+    top = admin_client.get("/admin/metrics", params={"period": 7}).json()["top_productos"]
+
+    assert len(top) == 10
+    assert [(p["nombre"], p["cantidad"], p["owner_email"]) for p in top[:3]] == [
+        ("Repetido", 30, auth_user.email),
+        ("Repetido", 25, None),
+        ("P00", 20, auth_user.email),
+    ]
 
 
 def test_the_platform_metrics_reject_a_user_who_is_not_an_admin(client):

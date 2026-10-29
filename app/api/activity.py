@@ -7,13 +7,15 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.security import get_current_admin
 from app.models.admin import AdminUser
-from app.models.app_models import AuthUser
+from app.models.app_models import AuthUser, ConsumptionEvent, Product
 from app.models.audit import AdminActivityLog, AdminRoleAudit, UserStatusAudit
 from app.schemas.platform import ActivityEntry, PaginatedActivity
 
 router = APIRouter(prefix="/admin/activity", tags=["admin-activity"])
 
-ACTIVITY_KINDS = "^(status|role|login|registered|product_created|product_updated|product_deleted)$"
+ACTIVITY_KINDS = "^(status|role|login|registered|product_created|product_exit|product_updated|product_deleted)$"
+
+EXIT_REASONS = {"consumed": "consumido", "sold": "vendido", "rented": "alquilado", "expired": "vencido"}
 
 
 def _sync_registrations(db: Session) -> None:
@@ -87,6 +89,37 @@ def list_activity(
                     target_email=target_email,
                     description=f"{target_email or e.user_id} {verb} el rol de administrador",
                     created_at=e.created_at,
+                )
+            )
+
+    if kind in (None, "product_exit"):
+        # Cada salida de stock de cada usuario sale del registro de consumo (app y dashboard, también las anteriores).
+        # Las correcciones del historial no cuentan: queda el movimiento corregido.
+        reversed_ids = db.query(ConsumptionEvent.reverses_event_id).filter(ConsumptionEvent.reverses_event_id.isnot(None))
+        exits = (
+            db.query(ConsumptionEvent)
+            .filter(
+                ConsumptionEvent.event_type != "restocked",
+                ConsumptionEvent.reverses_event_id.is_(None),
+                ConsumptionEvent.id.notin_(reversed_ids),
+            )
+            .all()
+        )
+        product_names = {p.id: p.nombre for p in db.query(Product.id, Product.nombre).all()}
+        for e in exits:
+            owner_email = emails.get(str(e.user_id))
+            who = owner_email or e.user_id
+            name = product_names.get(e.product_id, f"producto #{e.product_id}")
+            reason = EXIT_REASONS.get(e.event_type, "consumido")
+            entries.append(
+                ActivityEntry(
+                    id=f"exit-{e.id}",
+                    kind="product_exit",
+                    actor_email=e.actor_email,
+                    target_user_id=str(e.user_id),
+                    target_email=owner_email,
+                    description=f"{who} sacó {e.quantity} {'unidad' if e.quantity == 1 else 'unidades'} de \"{name}\" ({reason})",
+                    created_at=e.consumed_at,
                 )
             )
 

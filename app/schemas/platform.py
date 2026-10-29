@@ -391,6 +391,8 @@ class ProductoConsumo(BaseModel):
     product_id: int
     nombre: str
     cantidad: int
+    # Solo en el ranking de toda la plataforma: a qué usuario pertenece el producto
+    owner_email: Optional[str] = None
 
 
 class MyMetrics(BaseModel):
@@ -407,7 +409,7 @@ class MyMetrics(BaseModel):
 
 class ActivityEntry(BaseModel):
     id: str
-    kind: str  # "status" | "role" | "login" | "product_deleted"
+    kind: str  # "status" | "role" | "login" | "registered" | "product_created" | "product_exit" | "product_updated" | "product_deleted"
     actor_email: Optional[str] = None
     target_user_id: Optional[str] = None
     target_email: Optional[str] = None
