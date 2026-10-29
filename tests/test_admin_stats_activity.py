@@ -1,7 +1,7 @@
 """
 Panel de administración: tablero de estadísticas y el registro de actividad.
 """
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,7 +11,7 @@ from app.core.database import get_db
 from app.core.security import get_current_admin
 from app.main import app
 from app.models.app_models import AuthUser
-from app.models.audit import AdminActivityLog, AdminRoleAudit, UserStatusAudit
+from app.models.audit import AdminActivityLog, AdminRoleAudit, OCRScanAudit, UserStatusAudit
 from tests.conftest import create_admin, create_product, create_stock_alert
 
 
@@ -27,57 +27,6 @@ def admin_client(db_session):
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
-
-
-# ── tablero ──────────────────────────────────────────────────────────────────
-
-def test_dashboard_cuenta_usuarios_y_productos(admin_client, db_session, auth_user):
-    poco = create_product(db_session, auth_user, categoria="Lácteos", stock=1, imagen_url="http://x/1.jpg")
-    create_stock_alert(db_session, auth_user, poco, days_until_stockout=2)
-    create_product(db_session, auth_user, categoria="Lácteos", stock=5, vencimiento=ar_today())
-    create_product(db_session, auth_user, categoria="Limpieza", stock=3, vencimiento=ar_today() - timedelta(days=2))
-
-    data = admin_client.get("/admin/stats/").json()
-
-    assert data["total_users"] >= 1
-    assert data["active_users"] >= 1
-    assert data["total_products"] == 3
-    assert data["products_with_image"] == 1
-    assert data["low_stock_products"] == 1  # alcanza para menos de 7 días
-    assert data["expiring_soon_products"] == 2  # vence hoy y ya venció: las dos tienen una alerta crítica
-    assert data["expired_products"] == 1
-    assert data["total_units"] == 9
-    assert data["critical_alerts"] == 3
-    assert data["users_with_alerts"] == 1
-    labels = {c["label"] for c in data["products_by_category"]}
-    assert labels == {"Lácteos", "Limpieza"}
-    assert len(data["products_per_day_last_14d"]) == 14
-
-
-def test_dashboard_agrupa_sin_categoria(admin_client, db_session, auth_user):
-    # La columna es NOT NULL en la base real, pero una cadena vacía es igual de
-    # "sin categoría" a los fines del agrupado.
-    create_product(db_session, auth_user, categoria="", stock=5)
-
-    data = admin_client.get("/admin/stats/").json()
-
-    labels = {c["label"] for c in data["products_by_category"]}
-    assert "Sin categoría" in labels
-
-
-def test_dashboard_top_usuarios_por_productos(admin_client, db_session, auth_user):
-    create_product(db_session, auth_user)
-    create_product(db_session, auth_user)
-
-    data = admin_client.get("/admin/stats/").json()
-
-    top = data["top_users_by_products"]
-    assert any(u["email"] == auth_user.email and u["count"] == 2 for u in top)
-
-
-def test_dashboard_requiere_admin():
-    with TestClient(app) as c:
-        assert c.get("/admin/stats/").status_code in (401, 403)
 
 
 # ── actividad ────────────────────────────────────────────────────────────────
@@ -199,3 +148,124 @@ def test_activity_respeta_paginacion(admin_client, db_session, auth_user):
 def test_activity_requiere_admin():
     with TestClient(app) as c:
         assert c.get("/admin/activity/").status_code in (401, 403)
+
+
+# ── resumen de la plataforma (dashboard del administrador) ───────────────────
+
+def _con_alta_reciente(auth_user):
+    auth_user.created_at = datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def test_overview_cuenta_usuarios_altas_y_adopcion(admin_client, db_session, auth_user):
+    from app.models.app_models import AuthUser, ConsumptionEvent
+
+    _con_alta_reciente(auth_user)
+    viejo = AuthUser(email="viejo@x.com", hashed_password="x", is_active=False, created_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=30))
+    db_session.add(viejo)
+    producto = create_product(db_session, auth_user, nombre="Leche")
+    db_session.add(ConsumptionEvent(product_id=producto.id, user_id=str(auth_user.id), quantity=2, event_type="consumed"))
+    db_session.add(AdminActivityLog(
+        event_type="login", actor_email="x@x.com", target_user_id=str(viejo.id), target_email="viejo@x.com", description="inició sesión",
+    ))
+    db_session.commit()
+
+    data = admin_client.get("/admin/stats/overview", params={"period": 7}).json()
+
+    users = data["users"]
+    assert data["period_days"] == 7
+    assert (users["total"], users["active"]) == (2, 1)
+    assert users["new_in_period"] == 1
+    # el que movió stock y el que inició sesión cuentan como activos en el período
+    assert users["active_in_period"] == 2
+    assert users["with_products"] == 1
+    assert len(users["registrations_per_day"]) == 7 and sum(d["count"] for d in users["registrations_per_day"]) == 1
+
+
+def test_overview_arma_la_actividad_por_dia(admin_client, db_session, auth_user):
+    from app.models.app_models import ConsumptionEvent
+
+    uid = str(auth_user.id)
+    producto = create_product(db_session, auth_user, nombre="Leche", stock=50)
+    for cantidad, tipo in ((3, "consumed"), (2, "sold"), (4, "expired"), (5, "restocked")):
+        db_session.add(ConsumptionEvent(product_id=producto.id, user_id=uid, quantity=cantidad, event_type=tipo))
+    db_session.add(AdminActivityLog(
+        event_type="login", actor_email=auth_user.email, target_user_id=uid, target_email=auth_user.email, description="inició sesión",
+    ))
+    db_session.commit()
+
+    data = admin_client.get("/admin/stats/overview", params={"period": 7}).json()
+
+    actividad = data["activity_per_day"]
+    assert len(actividad) == 7
+    assert (sum(d["logins"] for d in actividad), sum(d["entradas"] for d in actividad), sum(d["salidas"] for d in actividad)) == (1, 1, 3)
+    assert "movements" not in data
+
+
+def test_overview_rankea_a_los_10_usuarios_mas_activos_con_sus_entradas_salidas_y_perfil(admin_client, db_session, auth_user):
+    from app.models.app_models import AuthUser, ConsumptionEvent, UserProfile
+
+    usuarios = [auth_user]
+    for i in range(11):
+        otro = AuthUser(email=f"u{i}@x.com", hashed_password="x", is_active=True)
+        db_session.add(otro)
+        usuarios.append(otro)
+    db_session.commit()
+    for i, usuario in enumerate(usuarios):
+        producto = create_product(db_session, usuario, nombre=f"P{i}", stock=10 + i)
+        for _ in range(i + 1):
+            db_session.add(ConsumptionEvent(product_id=producto.id, user_id=str(usuario.id), quantity=1, event_type="consumed"))
+    # el más activo también repuso dos veces y tiene perfil; el último está deshabilitado
+    top = usuarios[-1]
+    for _ in range(2):
+        db_session.add(ConsumptionEvent(product_id=_id_de_su_producto(db_session, top), user_id=str(top.id), quantity=1, event_type="restocked"))
+    db_session.add(UserProfile(user_id=str(top.id), username="el_top", first_name="Ana", last_name="Gómez"))
+    top.is_active = False
+    db_session.commit()
+
+    activos = admin_client.get("/admin/stats/overview").json()["most_active_users"]
+
+    assert len(activos) == 10
+    assert [u["movements"] for u in activos] == [14, 11, 10, 9, 8, 7, 6, 5, 4, 3]
+    primero = activos[0]
+    assert (primero["email"], primero["name"], primero["username"]) == ("u10@x.com", "Ana Gómez", "el_top")
+    assert (primero["entries"], primero["exits"], primero["products"], primero["units"], primero["is_active"]) == (2, 12, 1, 21, False)
+    assert activos[1]["name"] is None and activos[1]["username"] is None
+    assert set(primero) == {"user_id", "email", "name", "username", "movements", "entries", "exits", "products", "units", "is_active"}
+
+
+def _id_de_su_producto(db_session, usuario):
+    from app.models.app_models import Product
+
+    return db_session.query(Product).filter(Product.user_id == str(usuario.id)).first().id
+
+
+def test_overview_incluye_la_calidad_de_datos_y_el_rendimiento_del_ocr(admin_client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="Con todo", stock=4, vencimiento=date.today() + timedelta(days=9), imagen_url="http://x/1.jpg")
+    create_product(db_session, auth_user, nombre="Sin nada", stock=6)
+    db_session.add(OCRScanAudit(user_email=auth_user.email, origen="app", doc_type="barcode", status="done", processing_ms=200, confianza=0.9))
+    db_session.add(OCRScanAudit(user_email=auth_user.email, origen="app", doc_type="receipt", status="failed", processing_ms=1000, confianza=0.5))
+    db_session.commit()
+
+    data = admin_client.get("/admin/stats/overview").json()
+
+    inv = data["inventory"]
+    assert inv == {"products": 2, "units": 10, "with_image": 1, "without_expiry": 1}
+    ocr = data["ocr"]
+    assert (ocr["runs"], ocr["succeeded"]) == (2, 1)
+    assert ocr["avg_ms"] == 600 and ocr["avg_confidence"] == 0.7
+    assert {t["doc_type"] for t in ocr["by_type"]} == {"barcode", "receipt"}
+    assert data["period_days"] == 14
+
+
+def test_overview_sin_datos_devuelve_todo_en_cero(admin_client):
+    data = admin_client.get("/admin/stats/overview", params={"period": 7}).json()
+
+    assert data["users"]["total"] == 0 and data["most_active_users"] == []
+    assert data["inventory"]["products"] == 0 and data["ocr"]["runs"] == 0
+    assert data["ocr"]["avg_ms"] is None and data["ocr"]["by_type"] == []
+
+
+def test_overview_requiere_admin():
+    app.dependency_overrides.clear()
+    with TestClient(app) as c:
+        assert c.get("/admin/stats/overview").status_code in (401, 403)

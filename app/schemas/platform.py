@@ -11,37 +11,8 @@ class CategoryCount(BaseModel):
     count: int
 
 
-class DashboardStats(BaseModel):
-    total_users: int
-    active_users: int
-    inactive_users: int
-    new_users_last_7d: int
-    total_products: int
-    products_with_image: int
-    # Con las mismas reglas que la app: productos con una alerta crítica de stock mínimo (cobertura) y de vencimiento
-    low_stock_products: int
-    expiring_soon_products: int
-    expired_products: int
-    total_units: int = 0
-    critical_alerts: int = 0
-    warning_alerts: int = 0
-    users_with_alerts: int = 0
-    # Consumo y reposición de toda la plataforma en los últimos 7 días (hora argentina)
-    consumed_last_7d: int = 0
-    restocked_last_7d: int = 0
-    products_by_category: List[CategoryCount]
-    top_users_by_products: List["UserProductCount"]
-    products_per_day_last_14d: List["DayCount"]
-
-
 class DayCount(BaseModel):
     day: str
-    count: int
-
-
-class UserProductCount(BaseModel):
-    user_id: str
-    email: Optional[str] = None
     count: int
 
 
@@ -426,4 +397,64 @@ class PaginatedActivity(BaseModel):
     total: int
 
 
-DashboardStats.model_rebuild()
+# ── Resumen de la plataforma (dashboard del administrador) ───────────────────
+
+class UsersOverview(BaseModel):
+    total: int
+    # Con la cuenta habilitada
+    active: int
+    new_in_period: int
+    # Usuarios que hicieron algo en el período (iniciaron sesión o movieron stock)
+    active_in_period: int
+    # Los habilitados que ya cargaron al menos un producto
+    with_products: int
+    registrations_per_day: List["DayCount"]
+
+
+class ActivityDay(BaseModel):
+    day: str
+    logins: int = 0
+    entradas: int = 0
+    salidas: int = 0
+
+
+class InventoryOverview(BaseModel):
+    products: int
+    units: int
+    with_image: int
+    without_expiry: int
+
+
+class ActiveUserRow(BaseModel):
+    user_id: str
+    email: Optional[str] = None
+    # El nombre y el usuario que la persona tiene en su perfil
+    name: Optional[str] = None
+    username: Optional[str] = None
+    # Movimientos de stock del período: el total y cuántos fueron entradas y cuántos salidas
+    movements: int
+    entries: int
+    exits: int
+    products: int
+    units: int
+    is_active: bool = True
+
+
+class OcrOverview(BaseModel):
+    runs: int
+    succeeded: int
+    avg_ms: Optional[int] = None
+    avg_confidence: Optional[float] = None
+    by_type: List[dict]
+
+
+class PlatformOverview(BaseModel):
+    period_days: int
+    users: UsersOverview
+    activity_per_day: List[ActivityDay]
+    inventory: InventoryOverview
+    most_active_users: List[ActiveUserRow]
+    ocr: OcrOverview
+
+
+PlatformOverview.model_rebuild()
