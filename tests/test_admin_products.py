@@ -3,7 +3,7 @@ Panel de administración: listado, filtros, exportación y borrado de productos
 de cualquier usuario.
 """
 import uuid
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,7 +13,7 @@ from app.core.security import get_current_admin
 from app.main import app
 from app.models.app_models import Alert, AuthUser, Product
 from app.models.audit import AdminActivityLog
-from tests.conftest import create_admin, create_product
+from tests.conftest import create_admin, create_product, create_stock_alert
 
 
 @pytest.fixture()
@@ -63,10 +63,57 @@ def test_list_products_filtra_por_busqueda_categoria_y_dueno(admin_client, db_se
     assert data["total"] == 2
 
 
+def test_cada_producto_trae_sus_alertas_y_si_su_usuario_esta_deshabilitado(admin_client, db_session, auth_user):
+    poco = create_product(db_session, auth_user, nombre="Poco", stock=1)
+    create_stock_alert(db_session, auth_user, poco, days_until_stockout=2)
+
+    item = admin_client.get("/admin/products/").json()["items"][0]
+    assert item["alert_level"] is not None
+    assert [a["type"] for a in item["alerts"]] == ["stock_low_coverage"]
+    assert item["owner"]["is_active"] is True
+
+    auth_user.is_active = False
+    db_session.commit()
+    assert admin_client.get("/admin/products/").json()["items"][0]["owner"]["is_active"] is False
+
+
+def test_la_busqueda_encuentra_productos_por_el_mail_de_su_usuario(admin_client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="Leche entera")
+    create_product(db_session, auth_user, nombre="Detergente", user_id="otro-usuario")
+
+    por_mail = admin_client.get("/admin/products/", params={"search": auth_user.email[:6].upper()}).json()
+    assert [p["nombre"] for p in por_mail["items"]] == ["Leche entera"]
+
+    assert admin_client.get("/admin/products/", params={"search": "nadie@nada.com"}).json()["total"] == 0
+
+
+def test_se_filtra_por_marca_y_las_marcas_estan_entre_las_opciones(admin_client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="Leche", marca="La Serenísima")
+    create_product(db_session, auth_user, nombre="Yogur", marca="Ilolay")
+    create_product(db_session, auth_user, nombre="Sin marca", marca=None)
+
+    data = admin_client.get("/admin/products/", params={"marca": "ilolay"}).json()
+    assert [p["nombre"] for p in data["items"]] == ["Yogur"]
+    options = admin_client.get("/admin/products/filters/options").json()
+    assert options["marcas"] == ["Ilolay", "La Serenísima"]
+    acotadas = admin_client.get("/admin/products/filters/options", params={"user_id": str(auth_user.id)}).json()
+    assert acotadas["marcas"] == ["Ilolay", "La Serenísima"]
+
+
+def test_el_stock_total_suma_la_lista_filtrada(admin_client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="Leche", marca="A", stock=5)
+    create_product(db_session, auth_user, nombre="Yogur", marca="B", stock=7)
+
+    assert admin_client.get("/admin/products/stock-total").json() == {"stock_total": 12, "products": 2}
+    assert admin_client.get("/admin/products/stock-total", params={"marca": "B"}).json() == {"stock_total": 7, "products": 1}
+    assert admin_client.get("/admin/products/stock-total", params={"search": "nada"}).json() == {"stock_total": 0, "products": 0}
+
+
 def test_list_products_filtra_por_imagen_vencido_y_bajo_stock(admin_client, db_session, auth_user):
     create_product(db_session, auth_user, nombre="Con foto", imagen_url="http://x/1.jpg")
     create_product(db_session, auth_user, nombre="Vencido", vencimiento=date(2020, 1, 1))
-    create_product(db_session, auth_user, nombre="Poco stock", stock=1)
+    poco = create_product(db_session, auth_user, nombre="Poco stock", stock=1)
+    create_stock_alert(db_session, auth_user, poco, days_until_stockout=2)
 
     data = admin_client.get("/admin/products/", params={"only_with_image": True}).json()
     assert [p["nombre"] for p in data["items"]] == ["Con foto"]
@@ -79,6 +126,24 @@ def test_list_products_filtra_por_imagen_vencido_y_bajo_stock(admin_client, db_s
 
     data = admin_client.get("/admin/products/", params={"bajo_stock": True}).json()
     assert [p["nombre"] for p in data["items"]] == ["Poco stock"]
+    assert data["items"][0]["alert_level"] == "critical"
+    assert data["items"][0]["alert_types"] == ["stock_low_coverage"]
+
+
+def test_list_products_filtra_por_nivel_de_alerta(admin_client, db_session, auth_user):
+    from app.core.argentina import ar_today
+
+    create_product(db_session, auth_user, nombre="Crítico", stock=3, vencimiento=ar_today() + timedelta(days=2))
+    create_product(db_session, auth_user, nombre="Cerca", stock=3, vencimiento=ar_today() + timedelta(days=9))
+    create_product(db_session, auth_user, nombre="Lejos", stock=3, vencimiento=ar_today() + timedelta(days=60))
+
+    critical = admin_client.get("/admin/products/", params={"alert_level": "critical"}).json()["items"]
+    warning = admin_client.get("/admin/products/", params={"alert_level": "warning"}).json()["items"]
+
+    assert [p["nombre"] for p in critical] == ["Crítico"]
+    assert [p["nombre"] for p in warning] == ["Cerca"]
+    export = admin_client.get("/admin/products/export", params={"alert_level": "warning"}).content.decode("utf-8-sig")
+    assert "Cerca" in export and "Crítico" not in export
 
 
 def test_list_products_se_puede_ordenar(admin_client, db_session, auth_user):

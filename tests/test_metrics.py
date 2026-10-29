@@ -49,7 +49,8 @@ def test_metrics_counts_sales_and_rentals_as_consumption(client, db_session, aut
 
     assert data["total_consumido"] == 5
     assert sum(d["quantity"] for d in data["consumo_por_dia"]) == 5
-    assert data["top_productos"][0]["cantidad"] == 5
+    # el ranking cuenta las salidas de todo tipo, también los vencidos
+    assert data["top_productos"][0]["cantidad"] == 9
 
 
 def test_a_sale_or_a_rental_lowers_the_stock_and_keeps_its_type(client, db_session, auth_user):
@@ -70,3 +71,14 @@ def test_an_unknown_kind_of_exit_is_rejected_by_the_backoffice(client, db_sessio
     resp = client.post("/me/products/salida", json={"product_id": product.id, "quantity": 1, "event_type": "stolen"})
 
     assert resp.status_code == 422
+
+def test_the_day_of_an_event_is_the_argentine_one():
+    from datetime import datetime, timedelta, timezone
+
+    from app.core.argentina import ar_day as _ar_day
+
+    # 02:30 UTC del 13 son las 23:30 del 12 en Argentina; sin zona horaria se asume UTC
+    assert _ar_day(datetime(2026, 10, 13, 2, 30)).isoformat() == "2026-10-12"
+    assert _ar_day(datetime(2026, 10, 13, 3, 0, tzinfo=timezone.utc)).isoformat() == "2026-10-13"
+    assert _ar_day(datetime(2026, 10, 13, 1, 0, tzinfo=timezone(timedelta(hours=2)))).isoformat() == "2026-10-12"
+

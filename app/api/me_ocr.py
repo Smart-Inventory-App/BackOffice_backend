@@ -203,11 +203,6 @@ def salida_por_comprobante(
             db, product.id, uid, item.quantity, "consumed",
             actor_email=current.email, note=motivo,
         )
-        _log_activity(
-            db, "product_updated", current.email, uid, current.email,
-            f'{current.email} sacó {item.quantity} unidades de "{product.nombre}" '
-            f"({MOTIVO_COMPROBANTE}, stock: {product.stock}) desde el backoffice",
-        )
         procesados += 1
 
     return SalidaOCRResult(procesados=procesados, fallidos=len(errores), errores=errores)

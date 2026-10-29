@@ -3,7 +3,8 @@ Validación y normalización del código de barras.
 
 La regla está duplicada a propósito en `app_backend`, con estos mismos casos: si
 un servicio acepta un código que el otro rechaza, el mismo envase deja de
-encontrarse a sí mismo según desde dónde se lo haya cargado.
+encontrarse a sí mismo según desde dónde se lo haya cargado. No se exige el dígito
+verificador: muchos productos llevan códigos internos o de tiendas que no lo cumplen.
 """
 import pytest
 
@@ -24,6 +25,7 @@ ALTA = {"nombre": "Ibuprofeno", "categoria": "Farmacia", "stock": 5}
         ("036000291452", "0036000291452"),       # UPC-A se guarda como EAN-13
         ("96385074", "96385074"),                # EAN-8
         ("10012345678902", "10012345678902"),    # GTIN-14 de una caja mayorista
+        ("7794640172020", "7794640172020"),      # el verificador no cierra, pero el largo es válido: se acepta
     ],
 )
 def test_los_codigos_validos_quedan_en_su_forma_canonica(escrito, canonico):
@@ -34,7 +36,6 @@ def test_los_codigos_validos_quedan_en_su_forma_canonica(escrito, canonico):
     "escrito",
     [
         "12345",           # ningún GTIN tiene 5 dígitos
-        "7794640172020",   # un dígito mal copiado: no cierra el verificador
         "abc",             # antes se descartaba en silencio y quedaba "sin código"
         "7794640I72021",   # una I en lugar de un 1
         "77946401720²1",   # `isdigit()` lo acepta pero `int()` no puede convertirlo
@@ -78,9 +79,18 @@ def test_el_alta_guarda_el_codigo_normalizado(client, db_session, auth_user):
 def test_la_edicion_rechaza_un_codigo_invalido(client, db_session, auth_user):
     producto = create_product(db_session, auth_user)
 
-    resp = client.patch(f"/me/products/{producto.id}", json={"codigo_barras": "7794640172020"})
+    resp = client.patch(f"/me/products/{producto.id}", json={"codigo_barras": "12345"})
 
     assert resp.status_code == 400
+
+
+def test_la_edicion_acepta_un_codigo_sin_digito_verificador_valido(client, db_session, auth_user):
+    producto = create_product(db_session, auth_user)
+
+    resp = client.patch(f"/me/products/{producto.id}", json={"codigo_barras": "7794640172020"})
+
+    assert resp.status_code == 200
+    assert resp.json()["codigo_barras"] == "7794640172020"
 
 
 def test_la_edicion_permite_quitar_el_codigo(client, db_session, auth_user):
@@ -145,7 +155,7 @@ def test_la_importacion_marca_la_fila_con_un_codigo_invalido(client, db_session,
     # Mejor una fila en rojo en la vista previa que un código guardado que
     # después no coincide con lo que lee el escáner.
     filas = _importar(client, "nombre,categoria,stock,codigo_barras\n"
-                              "Ibuprofeno,Farmacia,3,7794640172020\n")
+                              "Ibuprofeno,Farmacia,3,12345\n")
 
     assert filas[0]["valid"] is False
     assert any("codigo_barras" in e for e in filas[0]["errors"])
@@ -188,9 +198,9 @@ def test_un_renglon_con_codigo_invalido_explica_el_motivo_sin_el_status(client, 
     resp = client.post("/me/products/bulk/commit", json={
         "mode": "entrada", "origen": "Documento Comercial",
         "rows": [{"row_number": 1, "nombre": "Ibuprofeno", "categoria": "Farmacia",
-                  "stock": 1, "codigo_barras": "7794640172020"}],
+                  "stock": 1, "codigo_barras": "12345"}],
     })
 
     cuerpo = resp.json()
     assert cuerpo["failed"] == 1
-    assert cuerpo["errors"][0].startswith("Fila 1: El dígito verificador")
+    assert cuerpo["errors"][0].startswith("Fila 1: Un código de barras tiene")

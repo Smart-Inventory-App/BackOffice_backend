@@ -132,10 +132,10 @@ def test_el_commit_no_confia_en_que_el_cliente_paso_por_el_parse(client, db_sess
     assert result["created"] == 1
     assert result["failed"] == 7
     assert result["errors"] == [
-        "Fila 2: stock debe ser mayor a 0",
-        "Fila 3: stock debe ser mayor a 0",
+        "Fila 2: El stock debe ser mayor a 0",
+        "Fila 3: El stock debe ser mayor a 0",
         "Fila 4: nombre supera los 20 caracteres",
-        "Fila 5: nombre es obligatorio",
+        "Fila 5: El nombre del producto es obligatorio",
         "Fila 6: categoria es obligatoria",
         "Fila 7: categoria supera los 20 caracteres",
         "Fila 8: descripcion supera los 400 caracteres",
@@ -151,7 +151,7 @@ def test_una_salida_con_cantidad_negativa_no_suma_stock(client, db_session, auth
     result = commit(client, [fila(row_number=1, stock=1, categoria=""), fila(row_number=2, stock=-50, categoria="")], mode="salida")
 
     assert result["failed"] == 1
-    assert result["errors"] == ["Fila 2: stock debe ser mayor a 0"]
+    assert result["errors"] == ["Fila 2: El stock debe ser mayor a 0"]
     assert [p["stock"] for p in client.get("/me/products").json()["items"]] == [2]
 
 

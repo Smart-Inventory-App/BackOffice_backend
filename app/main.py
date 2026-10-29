@@ -8,7 +8,7 @@ from app.core.database import Base, engine
 from app.models import admin as _admin  # noqa: F401
 from app.models import app_models as _app_models  # noqa: F401
 from app.models import audit as _audit  # noqa: F401
-from app.api import activity, alerts, auth, me, me_ocr, metrics, ml, ocr, products, stats, users
+from app.api import activity, alerts, auth, me, me_alerts, me_images, me_ocr, metrics, ml, ocr, products, stats, users
 
 # Creates `admin_users`. Mirrored tables (auth_users/products/user_profiles)
 # already exist (created by their owning services); create_all skips them.
@@ -30,6 +30,8 @@ app.include_router(stats.router)
 app.include_router(users.router)
 app.include_router(products.router)
 app.include_router(me.router)
+app.include_router(me_alerts.router)
+app.include_router(me_images.router)
 app.include_router(activity.router)
 app.include_router(ml.router)
 app.include_router(alerts.router)

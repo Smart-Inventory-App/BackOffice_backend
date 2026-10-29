@@ -79,7 +79,7 @@ def test_un_email_que_no_es_admin_no_pasa_get_current_admin(db_session, auth_use
     try:
         with TestClient(app) as c:
             resp = c.get(
-                "/admin/stats/",
+                "/admin/stats/overview",
                 headers={"Authorization": f"Bearer {_token(email=auth_user.email)}"},
             )
     finally:
@@ -98,7 +98,7 @@ def test_un_admin_inactivo_no_pasa_get_current_admin(db_session):
     try:
         with TestClient(app) as c:
             resp = c.get(
-                "/admin/stats/",
+                "/admin/stats/overview",
                 headers={"Authorization": f"Bearer {_token(email='baja@x.com')}"},
             )
     finally:
@@ -117,7 +117,7 @@ def test_un_admin_activo_pasa_get_current_admin(db_session):
     try:
         with TestClient(app) as c:
             resp = c.get(
-                "/admin/stats/",
+                "/admin/stats/overview",
                 headers={"Authorization": f"Bearer {_token(email='admin@x.com')}"},
             )
     finally:
@@ -128,7 +128,7 @@ def test_un_admin_activo_pasa_get_current_admin(db_session):
 
 def test_sin_header_de_autorizacion_es_401_o_403():
     with TestClient(app) as c:
-        assert c.get("/admin/stats/").status_code in (401, 403)
+        assert c.get("/admin/stats/overview").status_code in (401, 403)
 
 
 # ── health ───────────────────────────────────────────────────────────────────

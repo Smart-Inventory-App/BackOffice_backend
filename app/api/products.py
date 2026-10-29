@@ -2,8 +2,11 @@ from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import func
 from sqlalchemy.orm import Session, Query as SAQuery
 
+from app.core import alerts_view
+from app.core.argentina import ar_today
 from app.core.database import get_db
 from app.core.export import products_to_csv, products_to_xlsx
 from app.core.security import get_current_admin
@@ -34,6 +37,7 @@ def _email_map(db: Session) -> dict[str, str]:
 
 
 def _apply_filters(
+    db: Session,
     query: SAQuery,
     search: Optional[str],
     categoria: Optional[str],
@@ -41,24 +45,36 @@ def _apply_filters(
     only_with_image: bool,
     vencido: Optional[bool],
     bajo_stock: bool,
+    alert_level: Optional[str] = None,
+    marca: Optional[str] = None,
 ) -> SAQuery:
     if search:
         term = f"%{search}%"
-        query = query.filter(Product.nombre.ilike(term) | Product.marca.ilike(term))
+        # Se busca por nombre, marca o mail del usuario dueño del producto
+        owner_ids = [str(row[0]) for row in db.query(AuthUser.id).filter(AuthUser.email.ilike(term)).all()]
+        query = query.filter(Product.nombre.ilike(term) | Product.marca.ilike(term) | Product.user_id.in_(owner_ids))
     if categoria:
         query = query.filter(Product.categoria.ilike(categoria))
+    if marca:
+        query = query.filter(Product.marca.ilike(marca))
     if user_id:
         query = query.filter(Product.user_id == user_id)
     if only_with_image:
         query = query.filter(Product.imagen_url.isnot(None), Product.imagen_url != "")
+    today = ar_today()
     if vencido is True:
-        query = query.filter(Product.vencimiento.isnot(None), Product.vencimiento < date.today())
+        query = query.filter(Product.vencimiento.isnot(None), Product.vencimiento < today)
     elif vencido is False:
-        query = query.filter(
-            (Product.vencimiento.is_(None)) | (Product.vencimiento >= date.today())
-        )
-    if bajo_stock:
-        query = query.filter(Product.stock <= 1)
+        query = query.filter((Product.vencimiento.is_(None)) | (Product.vencimiento >= today))
+    if bajo_stock or alert_level:
+        # Las alertas dependen de la regla de cada producto (o la del perfil de su dueño) y del modelo predictivo, así
+        # que no se resuelven con un único WHERE: se buscan con el mismo criterio que el Centro de Alertas.
+        alerts = alerts_view.alerts_for(db, user_id or None)
+        if bajo_stock:
+            alerts = [a for a in alerts if a.type == alerts_view.STOCK_TYPE]
+        if alert_level:
+            alerts = [a for a in alerts if a.level == alert_level]
+        query = query.filter(Product.id.in_({a.product_id for a in alerts}))
     return query
 
 
@@ -76,7 +92,19 @@ def _ordered(query: SAQuery, sort_by: Optional[str], sort_dir: str, offset: int 
     )
 
 
-def _to_response(p: Product, emails: dict[str, str]) -> AdminProductResponse:
+def _inactive_ids(db: Session) -> set[str]:
+    """Los usuarios con la cuenta deshabilitada."""
+    return {str(row[0]) for row in db.query(AuthUser.id).filter(AuthUser.is_active.is_(False)).all()}
+
+
+def _to_response(
+    p: Product,
+    emails: dict[str, str],
+    levels: dict | None = None,
+    alerts: dict | None = None,
+    inactive: set[str] | None = None,
+) -> AdminProductResponse:
+    level, types = (levels or {}).get(p.id, (None, []))
     return AdminProductResponse(
         id=p.id,
         nombre=p.nombre,
@@ -88,8 +116,13 @@ def _to_response(p: Product, emails: dict[str, str]) -> AdminProductResponse:
         imagen_url=p.imagen_url,
         ubicacion=p.ubicacion,
         codigo_barras=p.codigo_barras,
+        stock_minimo=p.stock_minimo,
+        dias_alerta_vencimiento=p.dias_alerta_vencimiento,
         created_at=p.created_at,
-        owner=ProductOwner(user_id=p.user_id, email=emails.get(p.user_id)),
+        alert_level=level,
+        alert_types=types,
+        alerts=(alerts or {}).get(p.id, []),
+        owner=ProductOwner(user_id=p.user_id, email=emails.get(p.user_id), is_active=p.user_id not in (inactive or set())),
     )
 
 
@@ -103,6 +136,10 @@ def filter_options(
     if user_id:
         categorias_query = categorias_query.filter(Product.user_id == user_id)
     categorias = [row[0] for row in categorias_query.all() if row[0]]
+    marcas_query = db.query(Product.marca).distinct()
+    if user_id:
+        marcas_query = marcas_query.filter(Product.user_id == user_id)
+    marcas = [row[0] for row in marcas_query.all() if row[0]]
 
     owner_ids = [row[0] for row in db.query(Product.user_id).distinct().all()]
     emails = _email_map(db)
@@ -110,7 +147,7 @@ def filter_options(
         ({"user_id": uid, "email": emails.get(uid)} for uid in owner_ids),
         key=lambda o: (o["email"] or o["user_id"]).lower(),
     )
-    return {"categorias": sorted(categorias), "owners": owners}
+    return {"categorias": sorted(categorias), "marcas": sorted(marcas, key=alphabetical_key), "owners": owners}
 
 
 @router.get("/", response_model=PaginatedProducts)
@@ -121,6 +158,8 @@ def list_products(
     only_with_image: bool = Query(False),
     vencido: Optional[bool] = Query(None),
     bajo_stock: bool = Query(False),
+    alert_level: Optional[str] = Query(None, pattern="^(critical|warning)$"),
+    marca: Optional[str] = Query(None),
     sort_by: Optional[str] = Query(None, pattern="^(nombre|stock|vencimiento|categoria)$"),
     sort_dir: str = Query("asc", pattern="^(asc|desc)$"),
     limit: int = Query(30, ge=1, le=200),
@@ -128,13 +167,36 @@ def list_products(
     db: Session = Depends(get_db),
     _: AdminUser = Depends(get_current_admin),
 ):
-    query = _apply_filters(db.query(Product), search, categoria, user_id, only_with_image, vencido, bajo_stock)
+    query = _apply_filters(db, db.query(Product), search, categoria, user_id, only_with_image, vencido, bajo_stock, alert_level, marca)
     query = only_sortable(query, sort_by, Product.vencimiento)
 
     total = query.count()
     products = _ordered(query, sort_by, sort_dir, offset, limit)
     emails = _email_map(db)
-    return PaginatedProducts(items=[_to_response(p, emails) for p in products], total=total)
+    ids = [p.id for p in products]
+    levels = alerts_view.levels_by_product(db, ids)
+    alerts = alerts_view.alerts_by_product(db, ids)
+    inactive = _inactive_ids(db)
+    return PaginatedProducts(items=[_to_response(p, emails, levels, alerts, inactive) for p in products], total=total)
+
+
+@router.get("/stock-total")
+def stock_total(
+    search: Optional[str] = Query(None),
+    categoria: Optional[str] = Query(None),
+    user_id: Optional[str] = Query(None),
+    only_with_image: bool = Query(False),
+    vencido: Optional[bool] = Query(None),
+    bajo_stock: bool = Query(False),
+    alert_level: Optional[str] = Query(None, pattern="^(critical|warning)$"),
+    marca: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    _: AdminUser = Depends(get_current_admin),
+):
+    """Unidades en stock y cantidad de productos de la lista, con la búsqueda y los filtros elegidos."""
+    query = _apply_filters(db, db.query(Product), search, categoria, user_id, only_with_image, vencido, bajo_stock, alert_level, marca)
+    stock, products = query.with_entities(func.coalesce(func.sum(Product.stock), 0), func.count(Product.id)).one()
+    return {"stock_total": int(stock), "products": int(products)}
 
 
 @router.get("/export")
@@ -146,12 +208,14 @@ def export_products(
     only_with_image: bool = Query(False),
     vencido: Optional[bool] = Query(None),
     bajo_stock: bool = Query(False),
+    alert_level: Optional[str] = Query(None, pattern="^(critical|warning)$"),
+    marca: Optional[str] = Query(None),
     sort_by: Optional[str] = Query(None, pattern="^(nombre|stock|vencimiento|categoria)$"),
     sort_dir: str = Query("asc", pattern="^(asc|desc)$"),
     db: Session = Depends(get_db),
     _: AdminUser = Depends(get_current_admin),
 ):
-    query = _apply_filters(db.query(Product), search, categoria, user_id, only_with_image, vencido, bajo_stock)
+    query = _apply_filters(db, db.query(Product), search, categoria, user_id, only_with_image, vencido, bajo_stock, alert_level, marca)
     query = only_sortable(query, sort_by, Product.vencimiento)
     products = _ordered(query, sort_by, sort_dir)
     emails = _email_map(db)
@@ -246,7 +310,7 @@ def get_product_group(
     ordered = sorted(lots, key=lambda p: (p.vencimiento is None, p.vencimiento or date.max, p.id))
     return AdminProductGroupDetail(
         **_summarize(lots).model_dump(),
-        productos=[_to_response(p, emails) for p in ordered],
+        productos=[_to_response(p, emails, alerts_view.levels_by_product(db, [p.id for p in ordered])) for p in ordered],
     )
 
 
@@ -259,7 +323,7 @@ def get_product(
     p = db.query(Product).filter(Product.id == product_id).first()
     if not p:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Producto no encontrado")
-    return _to_response(p, _email_map(db))
+    return _to_response(p, _email_map(db), alerts_view.levels_by_product(db, [p.id]))
 
 
 @router.delete("/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
