@@ -79,6 +79,8 @@ class AuditEntry(BaseModel):
 class ProductOwner(BaseModel):
     user_id: str
     email: Optional[str] = None
+    # false si la cuenta del usuario está deshabilitada
+    is_active: bool = True
 
 
 class AdminProductResponse(BaseModel):
@@ -98,6 +100,8 @@ class AdminProductResponse(BaseModel):
     # La alerta más grave que tiene hoy el producto (critical | warning) y de qué tipos son; vacío si no tiene
     alert_level: Optional[str] = None
     alert_types: List[str] = []
+    # Las alertas del producto con todo lo necesario para mostrarlas (color, título y descripción)
+    alerts: List[AlertOut] = []
     owner: ProductOwner
 
 

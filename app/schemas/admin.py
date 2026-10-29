@@ -43,6 +43,8 @@ class CheckEmailResponse(BaseModel):
     password_set: bool
     # Cuenta creada con Google que todavía no tiene contraseña: tiene que crear una desde «Olvidé mi contraseña»
     google_only: bool = False
+    # La cuenta existe pero está deshabilitada: no puede iniciar sesión
+    disabled: bool = False
 
 
 class MeResponse(BaseModel):

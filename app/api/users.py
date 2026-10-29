@@ -167,7 +167,7 @@ def get_user(
                 created_at=p.created_at,
                 alert_level=levels.get(p.id, (None, []))[0],
                 alert_types=levels.get(p.id, (None, []))[1],
-                owner=ProductOwner(user_id=uid, email=user.email),
+                owner=ProductOwner(user_id=uid, email=user.email, is_active=bool(user.is_active)),
             )
             for p in products
         ],

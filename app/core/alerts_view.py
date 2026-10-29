@@ -115,6 +115,15 @@ def summarize(alerts: Iterable[AlertOut]) -> AlertSummary:
     )
 
 
+def alerts_by_product(db: Session, product_ids: list) -> dict[int, list[AlertOut]]:
+    """Las alertas de cada producto (las más graves primero), tal como las ve su dueño."""
+    found: dict[int, list[AlertOut]] = defaultdict(list)
+    if product_ids:
+        for alert in alerts_for(db, product_ids=product_ids):
+            found[alert.product_id].append(alert)
+    return found
+
+
 def levels_by_product(db: Session, product_ids: list) -> dict[int, tuple[str, list[str]]]:
     """Para cada producto con alertas: el nivel más grave y los tipos de alerta que tiene."""
     if not product_ids:

@@ -63,6 +63,52 @@ def test_list_products_filtra_por_busqueda_categoria_y_dueno(admin_client, db_se
     assert data["total"] == 2
 
 
+def test_cada_producto_trae_sus_alertas_y_si_su_usuario_esta_deshabilitado(admin_client, db_session, auth_user):
+    poco = create_product(db_session, auth_user, nombre="Poco", stock=1)
+    create_stock_alert(db_session, auth_user, poco, days_until_stockout=2)
+
+    item = admin_client.get("/admin/products/").json()["items"][0]
+    assert item["alert_level"] is not None
+    assert [a["type"] for a in item["alerts"]] == ["stock_low_coverage"]
+    assert item["owner"]["is_active"] is True
+
+    auth_user.is_active = False
+    db_session.commit()
+    assert admin_client.get("/admin/products/").json()["items"][0]["owner"]["is_active"] is False
+
+
+def test_la_busqueda_encuentra_productos_por_el_mail_de_su_usuario(admin_client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="Leche entera")
+    create_product(db_session, auth_user, nombre="Detergente", user_id="otro-usuario")
+
+    por_mail = admin_client.get("/admin/products/", params={"search": auth_user.email[:6].upper()}).json()
+    assert [p["nombre"] for p in por_mail["items"]] == ["Leche entera"]
+
+    assert admin_client.get("/admin/products/", params={"search": "nadie@nada.com"}).json()["total"] == 0
+
+
+def test_se_filtra_por_marca_y_las_marcas_estan_entre_las_opciones(admin_client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="Leche", marca="La Serenísima")
+    create_product(db_session, auth_user, nombre="Yogur", marca="Ilolay")
+    create_product(db_session, auth_user, nombre="Sin marca", marca=None)
+
+    data = admin_client.get("/admin/products/", params={"marca": "ilolay"}).json()
+    assert [p["nombre"] for p in data["items"]] == ["Yogur"]
+    options = admin_client.get("/admin/products/filters/options").json()
+    assert options["marcas"] == ["Ilolay", "La Serenísima"]
+    acotadas = admin_client.get("/admin/products/filters/options", params={"user_id": str(auth_user.id)}).json()
+    assert acotadas["marcas"] == ["Ilolay", "La Serenísima"]
+
+
+def test_el_stock_total_suma_la_lista_filtrada(admin_client, db_session, auth_user):
+    create_product(db_session, auth_user, nombre="Leche", marca="A", stock=5)
+    create_product(db_session, auth_user, nombre="Yogur", marca="B", stock=7)
+
+    assert admin_client.get("/admin/products/stock-total").json() == {"stock_total": 12, "products": 2}
+    assert admin_client.get("/admin/products/stock-total", params={"marca": "B"}).json() == {"stock_total": 7, "products": 1}
+    assert admin_client.get("/admin/products/stock-total", params={"search": "nada"}).json() == {"stock_total": 0, "products": 0}
+
+
 def test_list_products_filtra_por_imagen_vencido_y_bajo_stock(admin_client, db_session, auth_user):
     create_product(db_session, auth_user, nombre="Con foto", imagen_url="http://x/1.jpg")
     create_product(db_session, auth_user, nombre="Vencido", vencimiento=date(2020, 1, 1))

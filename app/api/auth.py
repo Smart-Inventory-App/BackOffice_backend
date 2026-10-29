@@ -68,8 +68,14 @@ def check_email(body: CheckEmailRequest, db: Session = Depends(get_db)):
         has_password = user.has_password is not False
         return CheckEmailResponse(exists=True, is_admin=False, password_set=has_password, google_only=not has_password)
 
+    if (admin and not admin.is_active) or (user and not user.is_active):
+        return CheckEmailResponse(exists=False, is_admin=False, password_set=False, disabled=True)
+
     return CheckEmailResponse(exists=False, is_admin=False, password_set=False)
 
+
+# Lo que se le dice a quien intenta entrar con una cuenta deshabilitada
+DISABLED_ACCOUNT_MESSAGE = "El usuario del mail ingresado se encuentra deshabilitado. Por favor, ingresa con otra cuenta"
 
 _REGISTER_ERROR_MESSAGES = {
     "auth.email_already_registered": "Ya existe una cuenta con ese email. Iniciá sesión.",
@@ -171,7 +177,7 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     admin = _get_admin_row(body.email, db)
     if admin:
         if not admin.is_active:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cuenta deshabilitada")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=DISABLED_ACCOUNT_MESSAGE)
         if not admin.password_set:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -179,8 +185,10 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
             )
     else:
         user = db.query(AuthUser).filter(AuthUser.email == body.email).first()
-        if not user or not user.is_active:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cuenta deshabilitada")
+        if not user:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No existe una cuenta con ese email")
+        if not user.is_active:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=DISABLED_ACCOUNT_MESSAGE)
 
     r = _auth_post("/auth/login", {"email": body.email, "password": body.password, "firebase_token": ""})
     if r.status_code == 200:
@@ -200,7 +208,7 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     if r.status_code == 401:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales inválidas")
     if r.status_code == 403:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cuenta deshabilitada")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=DISABLED_ACCOUNT_MESSAGE)
     raise HTTPException(status_code=r.status_code, detail="No se pudo iniciar sesión")
 
 
@@ -210,7 +218,7 @@ _GOOGLE_ERROR_MESSAGES = {
     "google_unreachable": "No se pudo contactar a Google",
     "google_invalid_token": "Token de Google inválido",
     "google_email_not_verified": "El email de Google no está verificado",
-    "account_disabled": "La cuenta está desactivada",
+    "account_disabled": DISABLED_ACCOUNT_MESSAGE,
 }
 
 
@@ -235,7 +243,7 @@ def google_login(body: GoogleLoginRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Error al iniciar sesión con Google")
     admin = _get_admin_row(email, db)
     if admin and not admin.is_active:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cuenta deshabilitada")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=DISABLED_ACCOUNT_MESSAGE)
 
     auth_user = db.query(AuthUser).filter(AuthUser.email == email).first()
     db.add(

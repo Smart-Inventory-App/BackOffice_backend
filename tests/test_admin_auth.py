@@ -39,12 +39,15 @@ def db_client(db_session):
 
 # ── check (100% local, sin tocar `auth`) ──────────────────────────────────────
 
+DISABLED = "El usuario del mail ingresado se encuentra deshabilitado. Por favor, ingresa con otra cuenta"
+
+
 def test_check_reconoce_un_admin_activo(db_client, db_session):
     create_admin(db_session, email="admin@x.com", password_set=True)
 
     data = db_client.post("/admin/auth/check", json={"email": "admin@x.com"}).json()
 
-    assert data == {"exists": True, "is_admin": True, "password_set": True, "google_only": False}
+    assert data == {"exists": True, "is_admin": True, "password_set": True, "google_only": False, "disabled": False}
 
 
 def test_check_reconoce_un_usuario_de_la_app_sin_ser_admin(db_client, db_session):
@@ -53,13 +56,13 @@ def test_check_reconoce_un_usuario_de_la_app_sin_ser_admin(db_client, db_session
 
     data = db_client.post("/admin/auth/check", json={"email": "user@x.com"}).json()
 
-    assert data == {"exists": True, "is_admin": False, "password_set": True, "google_only": False}
+    assert data == {"exists": True, "is_admin": False, "password_set": True, "google_only": False, "disabled": False}
 
 
 def test_check_un_email_desconocido_no_existe(db_client, db_session):
     data = db_client.post("/admin/auth/check", json={"email": "nadie@x.com"}).json()
 
-    assert data == {"exists": False, "is_admin": False, "password_set": False, "google_only": False}
+    assert data == {"exists": False, "is_admin": False, "password_set": False, "google_only": False, "disabled": False}
 
 
 def test_check_un_admin_inactivo_no_cuenta_como_admin(db_client, db_session):
@@ -68,6 +71,26 @@ def test_check_un_admin_inactivo_no_cuenta_como_admin(db_client, db_session):
     data = db_client.post("/admin/auth/check", json={"email": "baja@x.com"}).json()
 
     assert data["is_admin"] is False
+    assert data["disabled"] is True
+
+
+def test_check_avisa_cuando_el_usuario_esta_deshabilitado(db_client, db_session):
+    db_session.add(AuthUser(email="off@x.com", hashed_password="x", is_active=False))
+    db_session.commit()
+
+    data = db_client.post("/admin/auth/check", json={"email": "off@x.com"}).json()
+
+    assert data["exists"] is False and data["disabled"] is True
+
+
+def test_login_de_un_usuario_deshabilitado_dice_que_esta_deshabilitado(db_client, db_session, auth_service):
+    db_session.add(AuthUser(email="off@x.com", hashed_password="x", is_active=False))
+    db_session.commit()
+    auth_service(lambda _: httpx.Response(200, json={"access_token": "x"}))
+
+    resp = db_client.post("/admin/auth/login", json={"email": "off@x.com", "password": "x"})
+
+    assert resp.status_code == 403 and resp.json()["detail"] == DISABLED
 
 
 # ── register (delega enteramente en `auth`) ───────────────────────────────────
@@ -210,6 +233,7 @@ def test_login_cuenta_desconocida_es_403(db_client, db_session, auth_service):
     resp = db_client.post("/admin/auth/login", json={"email": "nadie@x.com", "password": "x"})
 
     assert resp.status_code == 403
+    assert resp.json()["detail"] == "No existe una cuenta con ese email"
 
 
 def test_login_credenciales_invalidas(db_client, db_session, auth_service):
@@ -582,7 +606,7 @@ def test_check_avisa_cuando_la_cuenta_se_creo_con_google_y_no_tiene_contrasena(d
 
     data = db_client.post("/admin/auth/check", json={"email": "google@x.com"}).json()
 
-    assert data == {"exists": True, "is_admin": False, "password_set": False, "google_only": True}
+    assert data == {"exists": True, "is_admin": False, "password_set": False, "google_only": True, "disabled": False}
 
 
 # ── recuperar la contraseña (delega en `auth`) ────────────────────────────────
@@ -781,7 +805,7 @@ def test_google_no_deja_entrar_a_un_administrador_dado_de_baja(db_client, db_ses
 
     resp = db_client.post("/admin/auth/google", json={"id_token": "t"})
 
-    assert resp.status_code == 403 and resp.json()["detail"] == "Cuenta deshabilitada"
+    assert resp.status_code == 403 and resp.json()["detail"] == DISABLED
 
 
 @pytest.mark.parametrize(
@@ -791,7 +815,7 @@ def test_google_no_deja_entrar_a_un_administrador_dado_de_baja(db_client, db_ses
         (401, "auth.google_email_not_verified", "El email de Google no está verificado"),
         (503, "auth.google_unreachable", "No se pudo contactar a Google"),
         (503, "auth.google_not_configured", "El inicio de sesión con Google no está disponible por el momento"),
-        (403, "auth.account_disabled", "La cuenta está desactivada"),
+        (403, "auth.account_disabled", DISABLED),
         (500, "auth.algo_raro", "Error al iniciar sesión con Google"),
     ],
 )
